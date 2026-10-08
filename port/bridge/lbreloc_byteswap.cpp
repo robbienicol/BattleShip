@@ -1537,6 +1537,18 @@ extern "C" void portRelocFixupTextureAtRuntime(const void *addr, unsigned int nu
 		num_bytes = (unsigned int)(available_bytes & ~(size_t)3u);
 	if (num_bytes == 0) return;
 
+	/* Fast path: this exact texture was already fixed at least this large on
+	 * an earlier draw. Every word it covers is already in sTexFixupWords, so
+	 * the per-word scans below would change nothing — skip them. (They cost
+	 * hundreds of thousands of set lookups per frame, which dominated frame
+	 * time in the browser build.) */
+	{
+		auto done = sTexFixupExtent.find(target);
+		if (done != sTexFixupExtent.end() && done->second >= num_bytes) {
+			return;
+		}
+	}
+
 	// If pass2 or the chain walk already fixed this exact base and runtime has
 	// never seen it, keep the old conservative skip. Runtime-owned fixups below
 	// are tracked per word to handle overlapping TLUT/LOADBLOCK ranges.

@@ -7,6 +7,8 @@
 #endif
 #if defined(__EMSCRIPTEN__)
 #include <emscripten.h>
+extern "C" double gPortWebPerfTickMs, gPortWebPerfDrawMs; /* port/gameloop.cpp */
+extern "C" int gPortWebDraws, gPortWebTexUploads, gPortWebReadbacks; /* gfx_opengl.cpp */
 #endif
 #include "port.h"
 #include "gameloop.h"
@@ -1421,9 +1423,28 @@ int main(int argc, char* argv[]) {
 	double nextFrameMs = emscripten_get_now();
 #endif
 	while (WindowIsRunning()) {
+#if defined(__EMSCRIPTEN__)
+		double frameStartMs = emscripten_get_now();
+#endif
 		PortPushFrame();
 		frame++;
 #if defined(__EMSCRIPTEN__)
+		{
+			/* Browser perf: average compute time per frame, every 600 frames. */
+			static double sSumMs = 0, sMaxMs = 0;
+			double ms = emscripten_get_now() - frameStartMs;
+			sSumMs += ms;
+			if (ms > sMaxMs) sMaxMs = ms;
+			if (frame % 600 == 0) {
+				port_log("SSB64 WebPerf: frames=%d avg=%.2fms max=%.2fms (tick %.2fms, draw %.2fms) per frame: "
+				         "draws=%d tex_uploads=%d readbacks=%d\n", frame, sSumMs / 600.0, sMaxMs,
+				         gPortWebPerfTickMs / 600.0, gPortWebPerfDrawMs / 600.0, gPortWebDraws / 600,
+				         gPortWebTexUploads / 600, gPortWebReadbacks / 600);
+				sSumMs = sMaxMs = 0;
+				gPortWebPerfTickMs = gPortWebPerfDrawMs = 0;
+				gPortWebDraws = gPortWebTexUploads = gPortWebReadbacks = 0;
+			}
+		}
 		nextFrameMs += 1000.0 / 60.0;
 		double now = emscripten_get_now();
 		if (nextFrameMs < now - 100.0) {

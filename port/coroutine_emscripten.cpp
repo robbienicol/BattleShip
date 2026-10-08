@@ -14,9 +14,9 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 
 extern "C" void port_log(const char *fmt, ...);
-static int sTraceSwaps = 200; /* temporary: trace the first fiber switches */
 
 namespace {
 
@@ -44,7 +44,13 @@ static PortCoroutine *sCurrent = nullptr;
 static void fiber_entry(void *p)
 {
 	PortCoroutine *co = static_cast<PortCoroutine *>(p);
-	co->entry(co->arg);
+	try {
+		co->entry(co->arg);
+	} catch (const std::exception &e) {
+		port_log("FIB %p: uncaught exception: %s\n", (void *)co, e.what());
+	} catch (...) {
+		port_log("FIB %p: uncaught non-std exception\n", (void *)co);
+	}
 	co->finished = 1;
 	for (;;) {
 		emscripten_fiber_swap(&co->fiber, co->caller);
@@ -106,9 +112,7 @@ void port_coroutine_resume(PortCoroutine *co)
 	emscripten_fiber_t *from = (prev != nullptr) ? &prev->fiber : &sMainFiber;
 	co->caller = from;
 	sCurrent = co;
-	if (sTraceSwaps > 0) { sTraceSwaps--; port_log("FIB resume %p from %p\n", (void *)co, (void *)prev); }
 	emscripten_fiber_swap(from, &co->fiber);
-	if (sTraceSwaps > 0) { sTraceSwaps--; port_log("FIB back in %p (resumed %p)\n", (void *)prev, (void *)co); }
 	sCurrent = prev;
 }
 
@@ -120,9 +124,7 @@ void port_coroutine_yield(void)
 		return;
 	}
 	port_watchdog_note_yield();
-	if (sTraceSwaps > 0) { sTraceSwaps--; port_log("FIB yield %p\n", (void *)co); }
 	emscripten_fiber_swap(&co->fiber, co->caller);
-	if (sTraceSwaps > 0) { sTraceSwaps--; port_log("FIB woke %p\n", (void *)co); }
 }
 
 int port_coroutine_is_finished(PortCoroutine *co)

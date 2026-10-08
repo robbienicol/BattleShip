@@ -67,6 +67,9 @@ extern "C" int portFastCaptureBackbufferPNG(const char *path);
  * Implemented in port/stubs/n64_stubs.c. */
 extern "C" void port_vi_simulate_vblank(void);
 
+/* Posts INTR_VRETRACE to the scheduler (port/stubs/n64_stubs.c). */
+extern "C" void port_post_vretrace(void);
+
 extern "C" void lbBackupApplyCheats(void);
 
 /* ========================================================================= */
@@ -117,6 +120,13 @@ static PortCoroutine *sGameCoroutine = NULL;
 /* Non-zero while a tick runs headless (rollback re-simulation): the game
  * updates but skips its draw pass, audio synthesis and new sound effects. */
 extern "C" int gPortHeadlessTick = 0;
+
+#if defined(__EMSCRIPTEN__)
+#include <emscripten.h>
+/* Browser perf accumulators (reported by port.cpp's main loop). */
+extern "C" double gPortWebPerfTickMs = 0;
+extern "C" double gPortWebPerfDrawMs = 0;
+#endif
 
 /* VI frame counter (incremented once per PortPushFrame, below). Lives up here
  * so the DL-submission path can stamp diagnostics with it. */
@@ -692,7 +702,7 @@ static void port_screenshot_maybe_capture(int frame)
 extern "C" void PortRunHeadlessTick(void)
 {
 	gPortHeadlessTick = 1;
-	osSendMesg(&gSYSchedulerTaskMesgQueue, port_make_os_mesg_int(INTR_VRETRACE), OS_MESG_NOBLOCK);
+	port_post_vretrace();
 	port_resume_service_threads();
 	port_enhancement_stage_hazards_tick();
 	gPortHeadlessTick = 0;
@@ -708,7 +718,7 @@ extern "C" void PortRunRenderedTick(void)
 	/* Post a VI retrace event to the scheduler's message queue. See
 	 * port_make_os_mesg_int() above for why we don't just write
 	 * `(OSMesg)INTR_VRETRACE` here. */
-	osSendMesg(&gSYSchedulerTaskMesgQueue, port_make_os_mesg_int(INTR_VRETRACE), OS_MESG_NOBLOCK);
+	port_post_vretrace();
 
 	/* TCC mod hook: GamePreUpdateEvent fires once per frame BEFORE the
 	 * per-frame coroutine resume. Listeners run on the main thread with
@@ -771,9 +781,15 @@ void PortPushFrame(void)
 	/* A rollback netplay session decides how many ticks run this frame
 	 * (none while waiting on the network, several when re-simulating).
 	 * Otherwise run exactly one tick. */
+#if defined(__EMSCRIPTEN__)
+	double webTickStart = emscripten_get_now();
+#endif
 	if (!port_rollback_session_frame()) {
 		PortRunRenderedTick();
 	}
+#if defined(__EMSCRIPTEN__)
+	gPortWebPerfTickMs += emscripten_get_now() - webTickStart;
+#endif
 
 	port_rollback_probe_tick();
 	port_rollback_synctest_tick();
@@ -834,7 +850,13 @@ void PortPushFrame(void)
 		gPortGLDumpDraws = (vi >= sDumpDrawsFirst && vi <= sDumpDrawsLast) ? vi : 0;
 	}
 #endif
+#if defined(__EMSCRIPTEN__)
+	double webDrawStart = emscripten_get_now();
+#endif
 	port_drain_pending_display_list();
+#if defined(__EMSCRIPTEN__)
+	gPortWebPerfDrawMs += emscripten_get_now() - webDrawStart;
+#endif
 
 	/* TCC mod hook: GamePostUpdateEvent fires once per frame AFTER game
 	 * logic + GFX submission. Most common subscription point — game state

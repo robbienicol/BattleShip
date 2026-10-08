@@ -457,6 +457,15 @@ void osViSwapBuffer(void *frameBufPtr)
 	sPortViNextFB = frameBufPtr;
 }
 
+/* Posts the VI retrace interrupt (code 1) to the scheduler. Lives in C so the
+ * message is a plain void*: C++ callers would pass libultraship's OSMesg
+ * union, which the WebAssembly ABI passes indirectly (as a pointer to a
+ * temporary) — the scheduler would receive that address instead of 1. */
+void port_post_vretrace(void)
+{
+	osSendMesg(&gSYSchedulerTaskMesgQueue, (OSMesg)1, OS_MESG_NOBLOCK);
+}
+
 void port_vi_simulate_vblank(void)
 {
 	if (sPortViNextFB != NULL) {

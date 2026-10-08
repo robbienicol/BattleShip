@@ -34,30 +34,30 @@ build-web holds assets extracted from your ROM — never publish it.
 - In the browser: boots, creates every N64 thread as a fiber, compiles all 74
   Fast3D shaders under WebGL2, enters the frame loop.
 
-## Current blocker
+## Status (2026-10-08): runs at full speed
 
-The first frame never completes. What is known (2026-10-08):
+In the browser it boots, plays through the opening sequence at a steady
+60 fps (~9 ms per frame: ~1 ms game logic, ~6 ms rendering). Fixes that got
+it there:
 
-- `-fwasm-exceptions` is incompatible with `-sASYNCIFY` (emcc warns; code
-  mixing them miscompiles). The build now uses `-fexceptions` (JS-based EH).
-- The fiber layer works on its own: a standalone test of
-  port/coroutine_emscripten.cpp (nested resume/yield, indirect calls across
-  yields) passes under node.
-- coroutine_emscripten.cpp currently logs the first 200 switches ("FIB ...",
-  temporary). Trace of frame 1: threads 8 and 5 resume and yield normally;
-  thread 3 (scheduler) resumes, wakes from osRecvMesg with VRETRACE, and then
-  execution simply stops — no yield, no return to the resumer, no console
-  error, Asyncify idle (state 0, no pending sleep), runtime not aborted.
-- Frame pacing sleeps are disabled on the web (gfx_sdl2 SyncFramerateWithTime,
-  gameloop fallback pacing); the log flushes every line on the web.
+- `-fwasm-exceptions` is incompatible with Asyncify — no exception catching
+  in the web build (the one known throw, thread creation, is gone).
+- C/C++ ABI: libultraship's `OSMesg` union is passed indirectly in wasm32, so
+  C++ code must not call the C `osSendMesg` with it; the VRETRACE post goes
+  through `port_post_vretrace()` in n64_stubs.c.
+- Function-signature mismatches between declarations and definitions become
+  traps in WebAssembly; fixed all four the linker reported (decomp
+  `osVirtualToPhysical`, link bomb release, PK Thunder group id, viewport).
+  Keep the link free of "function signature mismatch" warnings.
+- `gfxPointerHasReadableBytes` used `mincore()` per SETTIMG — a slow JS
+  syscall in the browser; it is a heap-bounds check there now.
+- Texture fixups skip per-word work for textures already fixed at that size.
 
-Next steps:
-1. Log each step of sySchedulerVRetrace (osSendMesg to each client,
-   sySchedulerSwapBuffer, sySchedulerExecuteTasksAll) to find the call that
-   never returns.
-2. Check whether a C++ exception thrown inside a fiber is swallowed by the
-   fiber trampoline with JS-based exceptions; wrap the fiber entry in
-   try/catch + port_log.
-3. If still unclear, build with -sASYNCIFY_DEBUG=1 for the first frame.
-4. Then: measure Asyncify cost; restrict instrumentation if needed. Rollback
-   on the web also needs a fiber-aware coroutine pool save/load.
+## Next
+
+1. Input (keyboard/gamepad via SDL in the browser) and audio output checks
+   on a visible page; asset extraction from the player's ROM in the browser
+   (Torch has an Emscripten build mode) instead of preloading files.
+2. Rollback on the web: fiber-aware coroutine pool save/load, WebRTC
+   DataChannel transport for GekkoNet, hook into ssb64-web matchmaking.
+3. Release build flags (drop -sASSERTIONS/--profiling-funcs), size/startup.

@@ -30,10 +30,43 @@ index 03b994f..cee592d 100644
      file(MAKE_DIRECTORY ${_LUS_HIDAPI_STUB_DIR})
      file(WRITE ${_LUS_HIDAPI_STUB_DIR}/hidapi.h [=[
 diff --git a/src/fast/backends/gfx_opengl.cpp b/src/fast/backends/gfx_opengl.cpp
-index 8a62750..3d6c5b0 100644
+index 8a62750..5d510b7 100644
 --- a/src/fast/backends/gfx_opengl.cpp
 +++ b/src/fast/backends/gfx_opengl.cpp
-@@ -736,7 +736,7 @@ void GfxRenderingAPIOGL::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size
+@@ -36,6 +36,16 @@
+ #define STB_IMAGE_WRITE_IMPLEMENTATION
+ #define STB_IMAGE_WRITE_STATIC
+ #include "stb_image_write.h"
++#if defined(__EMSCRIPTEN__)
++/* Browser perf counters (reported by port.cpp's main loop). */
++extern "C" {
++int gPortWebDraws = 0, gPortWebTexUploads = 0, gPortWebReadbacks = 0;
++}
++#define PORT_WEB_COUNT(v) ((v)++)
++#else
++#define PORT_WEB_COUNT(v) ((void)0)
++#endif
++
+ 
+ namespace Fast {
+ int GfxRenderingAPIOGL::GetMaxTextureSize() {
+@@ -604,6 +614,7 @@ void GfxRenderingAPIOGL::SelectTexture(int tile, GLuint texture_id) {
+ }
+ 
+ void GfxRenderingAPIOGL::UploadTexture(const uint8_t* rgba32_buf, uint32_t width, uint32_t height) {
++    PORT_WEB_COUNT(gPortWebTexUploads);
+     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba32_buf);
+     textures[mCurrentTextureIds[mCurrentTile]].width = width;
+     textures[mCurrentTextureIds[mCurrentTile]].height = height;
+@@ -727,6 +738,7 @@ void GfxRenderingAPIOGL::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size
+ 
+     // printf("flushing %d tris\n", buf_vbo_num_tris);
+     glBufferData(GL_ARRAY_BUFFER, sizeof(float) * buf_vbo_len, buf_vbo, GL_STREAM_DRAW);
++    PORT_WEB_COUNT(gPortWebDraws);
+     glDrawArrays(GL_TRIANGLES, 0, 3 * buf_vbo_num_tris);
+     if (gPortGLDumpDraws) {
+         GLDumpDrawVbo(buf_vbo, buf_vbo_len, buf_vbo_num_tris,
+@@ -736,7 +748,7 @@ void GfxRenderingAPIOGL::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size
  }
  
  void GfxRenderingAPIOGL::Init() {
@@ -42,6 +75,30 @@ index 8a62750..3d6c5b0 100644
      glewInit();
  #endif
  
+@@ -2075,6 +2087,7 @@ void GfxRenderingAPIOGL::ReadFramebufferToCPU(int fb_id, uint32_t width, uint32_
+     }
+ 
+     glBindFramebuffer(GL_FRAMEBUFFER, mFrameBuffers[fb_id].fbo);
++    PORT_WEB_COUNT(gPortWebReadbacks);
+     glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, (void*)rgba16_buf);
+     glBindFramebuffer(GL_FRAMEBUFFER, mFrameBuffers[mCurrentFrameBuffer].fbo);
+ }
+@@ -2093,6 +2106,7 @@ GfxRenderingAPIOGL::GetPixelDepth(int fb_id, const std::set<std::pair<float, flo
+         int x = coordinates.begin()->first;
+         int y = coordinates.begin()->second;
+ #ifndef USE_OPENGLES // not supported on gles. Runs fine without it, but this may cause issues
++        PORT_WEB_COUNT(gPortWebReadbacks);
+         glReadPixels(x, fb.invertY ? fb.height - y : y, 1, 1, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8,
+                      &depth_stencil_value);
+ #endif
+@@ -2133,6 +2147,7 @@ GfxRenderingAPIOGL::GetPixelDepth(int fb_id, const std::set<std::pair<float, flo
+         glBindFramebuffer(GL_READ_FRAMEBUFFER, mPixelDepthFb);
+         std::vector<uint32_t> depth_stencil_values(coordinates.size());
+ #ifndef USE_OPENGLES // not supported on gles. Runs fine without it, but this may cause issues
++        PORT_WEB_COUNT(gPortWebReadbacks);
+         glReadPixels(0, 0, coordinates.size(), 1, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, depth_stencil_values.data());
+ #endif
+         {
 diff --git a/src/fast/backends/gfx_sdl2.cpp b/src/fast/backends/gfx_sdl2.cpp
 index ddd8180..57546bc 100644
 --- a/src/fast/backends/gfx_sdl2.cpp
@@ -58,6 +115,35 @@ index ddd8180..57546bc 100644
      uint64_t t = qpc_to_100ns(SDL_GetPerformanceCounter());
  
      const int64_t next = previous_time + 10 * FRAME_INTERVAL_US_NUMERATOR / FRAME_INTERVAL_US_DENOMINATOR;
+diff --git a/src/fast/interpreter.cpp b/src/fast/interpreter.cpp
+index 7541f37..cb16626 100644
+--- a/src/fast/interpreter.cpp
++++ b/src/fast/interpreter.cpp
+@@ -95,6 +95,11 @@ static constexpr int kDLBoundsWalkedPast = 2;
+ #include "libultraship/libultra/os.h"
+ 
+ #include <spdlog/fmt/fmt.h>
++#if defined(__EMSCRIPTEN__)
++#include <emscripten.h>
++#include <emscripten/heap.h>
++extern "C" void port_log(const char* fmt, ...);
++#endif
+ 
+ std::stack<std::string> currentDir;
+ 
+@@ -480,6 +485,12 @@ bool gfxPointerHasReadableBytes(const void* ptr, size_t size) {
+     }
+ 
+     return true;
++#elif defined(__EMSCRIPTEN__)
++    // WebAssembly: all linear memory is readable, so a pointer is valid iff it
++    // lies inside the current heap. (mincore() would be a slow JS syscall on
++    // every SETTIMG.)
++    uintptr_t begin = reinterpret_cast<uintptr_t>(ptr);
++    return begin + size >= begin && begin + size <= emscripten_get_heap_size();
+ #else
+     // POSIX: probe with mincore(2) — it fails with ENOMEM when any page in
+     // the range is unmapped. This branch used to be an unconditional
 diff --git a/src/ship/Context.cpp b/src/ship/Context.cpp
 index 81b8fdd..cb35d0e 100644
 --- a/src/ship/Context.cpp
