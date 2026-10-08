@@ -36,19 +36,28 @@ build-web holds assets extracted from your ROM — never publish it.
 
 ## Current blocker
 
-The first frame never completes: it stalls inside
-port_resume_service_threads() (log ends mid-thread-dump). The page stays
-responsive, so wasm is parked in an Asyncify sleep rather than spinning.
-Suspects, in order:
-1. Something on a service thread sleeps through Asyncify inside a fiber
-   (SDL_Delay → emscripten_sleep, e.g. audio queue pacing in the audio thread
-   or controller polling). A sleep inside a fiber is not supported.
-2. Fiber/Asyncify instrumentation gaps on indirect calls (an earlier run with
-   emscripten_set_main_loop hit "table index is out of bounds" in
-   sySchedulerThreadMain during a fiber rewind).
+The first frame never completes. What is known (2026-10-08):
 
-Next steps: build with -sASYNCIFY_DEBUG or log each fiber swap + SDL_Delay
-call; make audio pacing non-blocking on the web; then measure Asyncify cost
-and restrict instrumentation (ASYNCIFY_ADD/IGNORE_INDIRECT) if needed. Rollback
-on the web also needs a fiber-aware coroutine pool save/load (currently the
-pool falls back to plain coroutines and rollback saves report unsupported).
+- `-fwasm-exceptions` is incompatible with `-sASYNCIFY` (emcc warns; code
+  mixing them miscompiles). The build now uses `-fexceptions` (JS-based EH).
+- The fiber layer works on its own: a standalone test of
+  port/coroutine_emscripten.cpp (nested resume/yield, indirect calls across
+  yields) passes under node.
+- coroutine_emscripten.cpp currently logs the first 200 switches ("FIB ...",
+  temporary). Trace of frame 1: threads 8 and 5 resume and yield normally;
+  thread 3 (scheduler) resumes, wakes from osRecvMesg with VRETRACE, and then
+  execution simply stops — no yield, no return to the resumer, no console
+  error, Asyncify idle (state 0, no pending sleep), runtime not aborted.
+- Frame pacing sleeps are disabled on the web (gfx_sdl2 SyncFramerateWithTime,
+  gameloop fallback pacing); the log flushes every line on the web.
+
+Next steps:
+1. Log each step of sySchedulerVRetrace (osSendMesg to each client,
+   sySchedulerSwapBuffer, sySchedulerExecuteTasksAll) to find the call that
+   never returns.
+2. Check whether a C++ exception thrown inside a fiber is swallowed by the
+   fiber trampoline with JS-based exceptions; wrap the fiber entry in
+   try/catch + port_log.
+3. If still unclear, build with -sASYNCIFY_DEBUG=1 for the first frame.
+4. Then: measure Asyncify cost; restrict instrumentation if needed. Rollback
+   on the web also needs a fiber-aware coroutine pool save/load.

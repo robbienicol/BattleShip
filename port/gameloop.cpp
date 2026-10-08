@@ -877,6 +877,10 @@ void PortPushFrame(void)
 				}
 			}
 
+#if defined(__EMSCRIPTEN__)
+			/* The browser main loop paces frames (port/port.cpp). */
+			idlePresented = true;
+#endif
 			if (!idlePresented) {
 				/* Fallback pace to one VI period if there is no cached
 				 * framebuffer yet. Normal idle presents pace through the

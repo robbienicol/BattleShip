@@ -15,6 +15,9 @@
 #include <cstdio>
 #include <cstdlib>
 
+extern "C" void port_log(const char *fmt, ...);
+static int sTraceSwaps = 200; /* temporary: trace the first fiber switches */
+
 namespace {
 
 constexpr size_t kMinStack = 64 * 1024;
@@ -103,7 +106,9 @@ void port_coroutine_resume(PortCoroutine *co)
 	emscripten_fiber_t *from = (prev != nullptr) ? &prev->fiber : &sMainFiber;
 	co->caller = from;
 	sCurrent = co;
+	if (sTraceSwaps > 0) { sTraceSwaps--; port_log("FIB resume %p from %p\n", (void *)co, (void *)prev); }
 	emscripten_fiber_swap(from, &co->fiber);
+	if (sTraceSwaps > 0) { sTraceSwaps--; port_log("FIB back in %p (resumed %p)\n", (void *)prev, (void *)co); }
 	sCurrent = prev;
 }
 
@@ -115,7 +120,9 @@ void port_coroutine_yield(void)
 		return;
 	}
 	port_watchdog_note_yield();
+	if (sTraceSwaps > 0) { sTraceSwaps--; port_log("FIB yield %p\n", (void *)co); }
 	emscripten_fiber_swap(&co->fiber, co->caller);
+	if (sTraceSwaps > 0) { sTraceSwaps--; port_log("FIB woke %p\n", (void *)co); }
 }
 
 int port_coroutine_is_finished(PortCoroutine *co)

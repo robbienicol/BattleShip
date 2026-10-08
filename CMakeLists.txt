@@ -1016,7 +1016,7 @@ if (EMSCRIPTEN)
         -sASYNCIFY -sASYNCIFY_STACK_SIZE=262144
         -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=268435456 -sSTACK_SIZE=2097152
         -sFORCE_FILESYSTEM=1 -sEXIT_RUNTIME=0
-        -fwasm-exceptions -sASSERTIONS=1 --profiling-funcs)
+        -fexceptions -sASSERTIONS=1 --profiling-funcs)
     set_target_properties(${PROJECT_NAME} PROPERTIES SUFFIX ".html")
 endif()
 
