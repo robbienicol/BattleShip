@@ -3,7 +3,7 @@
  * support snapshotting yet (Win32 fibers, Android asm). Pooled coroutines are
  * plain coroutines and saving reports "unsupported", so rollback stays off.
  */
-#if defined(_WIN32) || defined(__ANDROID__)
+#if defined(_WIN32) || defined(__ANDROID__) || defined(__EMSCRIPTEN__)
 
 #include "coroutine.h"
 

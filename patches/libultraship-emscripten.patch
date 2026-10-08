@@ -1,0 +1,176 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 7f2e09a..526326c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -46,6 +46,10 @@ if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
+     include(cmake/dependencies/ios.cmake)
+ endif()
+ 
++if(CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
++    include(cmake/dependencies/emscripten.cmake)
++endif()
++
+ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+     include(cmake/dependencies/linux.cmake)
+ endif()
+diff --git a/cmake/dependencies/common.cmake b/cmake/dependencies/common.cmake
+index 03b994f..cee592d 100644
+--- a/cmake/dependencies/common.cmake
++++ b/cmake/dependencies/common.cmake
+@@ -203,8 +203,9 @@ FetchContent_MakeAvailable(prism)
+ # in libultraship still link cleanly; at runtime hid_init() reports
+ # success but hid_enumerate() returns nullptr, so RaphnetPhysicalDeviceManager
+ # decides "no adapter found" and the SDL2 / Java HIDDeviceManager handles
+-# everything that's actually present.
+-if (CMAKE_SYSTEM_NAME STREQUAL "Android")
++# everything that's actually present. Browsers (Emscripten) have no native
++# HID either and use the same stub.
++if (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
+     set(_LUS_HIDAPI_STUB_DIR ${CMAKE_CURRENT_BINARY_DIR}/hidapi_stub)
+     file(MAKE_DIRECTORY ${_LUS_HIDAPI_STUB_DIR})
+     file(WRITE ${_LUS_HIDAPI_STUB_DIR}/hidapi.h [=[
+diff --git a/src/fast/backends/gfx_opengl.cpp b/src/fast/backends/gfx_opengl.cpp
+index 8a62750..3d6c5b0 100644
+--- a/src/fast/backends/gfx_opengl.cpp
++++ b/src/fast/backends/gfx_opengl.cpp
+@@ -736,7 +736,7 @@ void GfxRenderingAPIOGL::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size
+ }
+ 
+ void GfxRenderingAPIOGL::Init() {
+-#if !defined(__linux__) && !defined(__OpenBSD__)
++#if !defined(__linux__) && !defined(__OpenBSD__) && !defined(__EMSCRIPTEN__)
+     glewInit();
+ #endif
+ 
+diff --git a/src/fast/backends/gfx_sdl2.cpp b/src/fast/backends/gfx_sdl2.cpp
+index ddd8180..57546bc 100644
+--- a/src/fast/backends/gfx_sdl2.cpp
++++ b/src/fast/backends/gfx_sdl2.cpp
+@@ -714,6 +714,11 @@ static uint64_t qpc_to_100ns(uint64_t qpc) {
+ }
+ 
+ void GfxWindowBackendSDL2::SyncFramerateWithTime() const {
++#if defined(__EMSCRIPTEN__)
++    // The browser build paces frames in its main loop (port/port.cpp);
++    // sleeping or spinning here would freeze the page.
++    return;
++#endif
+     uint64_t t = qpc_to_100ns(SDL_GetPerformanceCounter());
+ 
+     const int64_t next = previous_time + 10 * FRAME_INTERVAL_US_NUMERATOR / FRAME_INTERVAL_US_DENOMINATOR;
+diff --git a/src/ship/Context.cpp b/src/ship/Context.cpp
+index 81b8fdd..cb35d0e 100644
+--- a/src/ship/Context.cpp
++++ b/src/ship/Context.cpp
+@@ -115,8 +115,10 @@ bool Context::InitLogging(spdlog::level::level_enum debugBuildLogLevel,
+     }
+ 
+     try {
+-        // Setup Logging
++        // Setup Logging (the browser build has no threads: log synchronously)
++#if !defined(__EMSCRIPTEN__)
+         spdlog::init_thread_pool(8192, 1);
++#endif
+         std::vector<spdlog::sink_ptr> sinks;
+ 
+ #if (!defined(_WIN32)) || defined(_DEBUG)
+@@ -169,7 +171,11 @@ bool Context::InitLogging(spdlog::level::level_enum debugBuildLogLevel,
+         }
+         auto fileSink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(logPath, 1024 * 1024 * 10, 10);
+         sinks.push_back(fileSink);
+-#ifdef _DEBUG
++#if defined(__EMSCRIPTEN__)
++        mLogger = std::make_shared<spdlog::logger>(GetName(), sinks.begin(), sinks.end());
++        GetLogger()->set_level(releaseBuildLogLevel);
++        GetLogger()->flush_on(spdlog::level::info);
++#elif defined(_DEBUG)
+         mLogger = std::make_shared<spdlog::logger>("multi_sink", sinks.begin(), sinks.end());
+         GetLogger()->set_level(debugBuildLogLevel);
+         GetLogger()->flush_on(spdlog::level::trace);
+diff --git a/src/ship/resource/ResourceManager.cpp b/src/ship/resource/ResourceManager.cpp
+index 3bdbaf0..6800d21 100644
+--- a/src/ship/resource/ResourceManager.cpp
++++ b/src/ship/resource/ResourceManager.cpp
+@@ -9,6 +9,30 @@
+ #include "ship/config/ConsoleVariable.h"
+ #include "ship/Context.h"
+ 
++namespace {
++// Runs a loading task on the pool, or — in the browser build, which has no
++// threads — right away, returning an already-completed future.
++template <typename F>
++auto RunOrSubmit(std::shared_ptr<BS::thread_pool>& pool, F&& task, BS::priority_t priority = 0)
++    -> std::shared_future<decltype(task())> {
++#if defined(__EMSCRIPTEN__)
++    (void)pool;
++    (void)priority;
++    using Result = decltype(task());
++    std::promise<Result> promise;
++    if constexpr (std::is_void_v<Result>) {
++        task();
++        promise.set_value();
++    } else {
++        promise.set_value(task());
++    }
++    return promise.get_future().share();
++#else
++    return pool->submit_task(std::forward<F>(task), priority);
++#endif
++}
++} // namespace
++
+ namespace Ship {
+ 
+ ResourceFilter::ResourceFilter(const std::list<std::string>& includeMasks, const std::list<std::string>& excludeMasks,
+@@ -57,6 +81,7 @@ void ResourceManager::Init(const std::vector<std::string>& archivePaths,
+     GetArchiveManager()->Init(archivePaths, validHashes);
+ 
+     // the extra `- 1` is because we reserve an extra thread for spdlog
++#if !defined(__EMSCRIPTEN__)
+     size_t threadCount = std::max(1, (int32_t)(std::thread::hardware_concurrency() - reservedThreadCount - 1));
+     mThreadPool = std::make_shared<BS::thread_pool>(threadCount);
+ 
+@@ -64,6 +89,7 @@ void ResourceManager::Init(const std::vector<std::string>& archivePaths,
+         // Nothing ever unpauses the thread pool since nothing will ever try to load the archive again.
+         mThreadPool->pause();
+     }
++#endif
+ }
+ 
+ ResourceManager::~ResourceManager() {
+@@ -211,7 +237,7 @@ ResourceManager::LoadResourceAsync(const ResourceIdentifier& identifier, bool lo
+         return promise->get_future().share();
+     }
+ 
+-    return mThreadPool->submit_task(
++    return RunOrSubmit(mThreadPool, 
+         [this, identifier, loadExact, initData]() -> std::shared_ptr<IResource> {
+             return LoadResourceProcess(identifier, loadExact, initData);
+         },
+@@ -328,7 +354,7 @@ ResourceManager::LoadResourcesProcess(const ResourceFilter& filter) {
+ 
+ std::shared_future<std::shared_ptr<std::vector<std::shared_ptr<IResource>>>>
+ ResourceManager::LoadResourcesAsync(const ResourceFilter& filter, BS::priority_t priority) {
+-    return mThreadPool->submit_task(
++    return RunOrSubmit(mThreadPool, 
+         [this, filter]() -> std::shared_ptr<std::vector<std::shared_ptr<IResource>>> {
+             return LoadResourcesProcess(filter);
+         },
+@@ -349,7 +375,7 @@ std::shared_ptr<std::vector<std::shared_ptr<IResource>>> ResourceManager::LoadRe
+ }
+ 
+ void ResourceManager::DirtyResources(const ResourceFilter& filter) {
+-    mThreadPool->submit_task([this, filter]() -> void {
++    RunOrSubmit(mThreadPool, [this, filter]() -> void {
+         auto list = GetArchiveManager()->ListFiles(filter.IncludeMasks, filter.ExcludeMasks);
+ 
+         for (const auto& key : *list.get()) {
+@@ -373,7 +399,7 @@ void ResourceManager::UnloadResourcesAsync(const std::string& searchMask, BS::pr
+ }
+ 
+ void ResourceManager::UnloadResourcesAsync(const ResourceFilter& filter, BS::priority_t priority) {
+-    mThreadPool->submit_task([this, filter]() -> void { UnloadResourcesProcess(filter); }, priority);
++    RunOrSubmit(mThreadPool, [this, filter]() -> void { UnloadResourcesProcess(filter); }, priority);
+ }
+ 
+ void ResourceManager::UnloadResources(const std::string& searchMask) {

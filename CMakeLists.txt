@@ -552,6 +552,16 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android")
         "port/enhancements/(Updater|DiscordRichPresence|ShaderDownloader)\\.cpp$")
     list(FILTER SSB64_SRC_PORT EXCLUDE REGEX "port/port_window_icon\\.cpp$")
 endif()
+if (CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
+    # Browser build: no self-updater, Discord, shader downloader, window
+    # icon, or native Torch bridge (assets are extracted separately).
+    list(FILTER SSB64_SRC_PORT EXCLUDE REGEX "port/android_torch_bridge\\.cpp$")
+    list(FILTER SSB64_SRC_PORT EXCLUDE REGEX
+        "port/enhancements/(Updater|DiscordRichPresence|ShaderDownloader)\\.cpp$")
+    list(FILTER SSB64_SRC_PORT EXCLUDE REGEX "port/port_window_icon\\.cpp$")
+    # Native debugging tools; port/web_debug_stubs.cpp provides no-ops.
+    list(FILTER SSB64_SRC_PORT EXCLUDE REGEX "port/(port_watchdog|renderdoc_trigger)\\.cpp$")
+endif()
 if(BATTLESHIP_UWP)
     # Xbox packages are updated as MSIX and cannot use these Win32
     # shell-out/IPC integrations.
@@ -562,7 +572,7 @@ if(BATTLESHIP_UWP)
 endif()
 # Treat the generated icon header as a source so CMake schedules it ahead
 # of any port TU compilation (port_window_icon.cpp #includes it).
-if (NOT CMAKE_SYSTEM_NAME STREQUAL "Android" AND NOT BATTLESHIP_UWP)
+if (NOT CMAKE_SYSTEM_NAME STREQUAL "Android" AND NOT BATTLESHIP_UWP AND NOT EMSCRIPTEN)
     list(APPEND SSB64_SRC_PORT ${SSB64_ICON_GEN})
 endif()
 # Arrow + nameplate baked headers — added as sources so CMake schedules their
@@ -860,7 +870,7 @@ endif()
 # Fetch Discord RPC (desktop only — Android drops Discord Rich Presence
 # along with the rest of the network-dependent features).
 ################################################################################
-if (NOT CMAKE_SYSTEM_NAME STREQUAL "Android" AND NOT BATTLESHIP_UWP)
+if (NOT CMAKE_SYSTEM_NAME STREQUAL "Android" AND NOT BATTLESHIP_UWP AND NOT EMSCRIPTEN)
     # discord-rpc v3.4.0's CMakeLists declares cmake_minimum_required(VERSION 2.x),
     # which CMake 3.30+ refuses to honor. Force a baseline policy version for the
     # fetched subdir so the build still configures with current CMake.
@@ -962,7 +972,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/debug_tools
     ${SSB64_CSS_GEN_DIR}                         # CSS icon baked headers (arrow_data.h)
 )
-if (NOT CMAKE_SYSTEM_NAME STREQUAL "Android" AND NOT BATTLESHIP_UWP)
+if (NOT CMAKE_SYSTEM_NAME STREQUAL "Android" AND NOT BATTLESHIP_UWP AND NOT EMSCRIPTEN)
     target_include_directories(${PROJECT_NAME} PRIVATE
         ${SSB64_ICON_GEN_DIR}                         # Generated icon header (port_icon_data.h)
         ${discord_rpc_SOURCE_DIR}/include             # Discord Rich Presence
@@ -979,7 +989,7 @@ endif()
 # Link libultraship and Torch
 ################################################################################
 
-if (CMAKE_SYSTEM_NAME STREQUAL "Android")
+if (CMAKE_SYSTEM_NAME STREQUAL "Android" OR EMSCRIPTEN)
     add_dependencies(${PROJECT_NAME} libultraship)
     target_link_libraries(${PROJECT_NAME} PRIVATE libultraship)
 elseif(BATTLESHIP_UWP)
@@ -995,6 +1005,19 @@ endif()
 # arriving transitively through libultraship's PRIVATE framework links.
 if (APPLE)
     target_link_libraries(${PROJECT_NAME} PRIVATE "-framework CoreFoundation")
+endif()
+
+# Browser build: WebGL2, Asyncify (coroutines are Emscripten fibers), growable
+# memory, and an HTML page to host the canvas.
+if (EMSCRIPTEN)
+    target_link_options(${PROJECT_NAME} PRIVATE
+        -sUSE_SDL=2 -sUSE_ZLIB=1
+        -sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2 -sFULL_ES3=1
+        -sASYNCIFY -sASYNCIFY_STACK_SIZE=262144
+        -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=268435456 -sSTACK_SIZE=2097152
+        -sFORCE_FILESYSTEM=1 -sEXIT_RUNTIME=0
+        -fwasm-exceptions -sASSERTIONS=1 --profiling-funcs)
+    set_target_properties(${PROJECT_NAME} PROPERTIES SUFFIX ".html")
 endif()
 
 # Rollback netcode: GekkoNet (BSD-2-Clause), vendored at third_party/GekkoNet

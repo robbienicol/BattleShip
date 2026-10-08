@@ -2,8 +2,11 @@
 // the .so via dlsym("SDL_main"), so we let SDL_main.h's `#define main SDL_main`
 // rename the entry point during preprocessing — which is exactly what
 // SDL_MAIN_HANDLED would suppress.
-#if !defined(__ANDROID__) && !defined(BATTLESHIP_UWP)
+#if !defined(__ANDROID__) && !defined(BATTLESHIP_UWP) && !defined(__EMSCRIPTEN__)
 #define SDL_MAIN_HANDLED
+#endif
+#if defined(__EMSCRIPTEN__)
+#include <emscripten.h>
 #endif
 #include "port.h"
 #include "gameloop.h"
@@ -39,7 +42,7 @@
 #include "hires/HiResHook.h"
 #include "hires/HiResPack.h"
 #endif
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__EMSCRIPTEN__)
 #include "port_window_icon.h"
 #endif
 #if defined(__ANDROID__)
@@ -915,7 +918,7 @@ static int PortInitImpl(int argc, char* argv[]) {
 			port_log("SSB64: Port menu attached\n");
 		}
 
-#if !defined(__ANDROID__) && !defined(BATTLESHIP_UWP)
+#if !defined(__ANDROID__) && !defined(BATTLESHIP_UWP) && !defined(__EMSCRIPTEN__)
 		// Linux: WMs only show the app icon if SDL_SetWindowIcon is called
 		// on the live window. .ico/.icns paths are baked into the .exe /
 		// .app on Windows / macOS so this is a no-op there. Android pulls
@@ -1412,9 +1415,22 @@ int main(int argc, char* argv[]) {
 	}
 	int frame = 0;
 	bool firstRunHintShown = false;
+#if defined(__EMSCRIPTEN__)
+	/* Browser: after each frame, yield to the page until the next 60 Hz slot
+	 * (Asyncify unwinds back to the event loop and resumes here). */
+	double nextFrameMs = emscripten_get_now();
+#endif
 	while (WindowIsRunning()) {
 		PortPushFrame();
 		frame++;
+#if defined(__EMSCRIPTEN__)
+		nextFrameMs += 1000.0 / 60.0;
+		double now = emscripten_get_now();
+		if (nextFrameMs < now - 100.0) {
+			nextFrameMs = now; /* fell far behind (tab hidden): don't burst */
+		}
+		emscripten_sleep((unsigned)(nextFrameMs > now ? nextFrameMs - now : 0));
+#endif
 
 		if (!firstRunHintShown && frame == 60) {
 			auto cv = sContext->GetConsoleVariables();

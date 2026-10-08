@@ -1,0 +1,26 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>BattleShip Web Test</title>
+<style>html,body{margin:0;height:100%;background:#000}canvas{width:100%;height:100%;display:block}#log{position:fixed;left:0;bottom:0;color:#0f0;font:12px monospace;max-height:40%;overflow:auto;white-space:pre}</style>
+</head><body>
+<canvas id="canvas" oncontextmenu="event.preventDefault()"></canvas>
+<div id="log"></div>
+<script>
+// Local test harness only: loads the extracted assets next to this page into
+// the game's virtual filesystem. Never deploy this directory.
+const files = ["BattleShip.o2r", "f3d.o2r", "gamecontrollerdb.txt"]; // plus assets/** (add the files in build-web/assets)
+const log = (t) => { const el = document.getElementById("log"); el.textContent += t + "\n"; el.scrollTop = 1e9; };
+var Module = {
+  canvas: document.getElementById("canvas"),
+  print: log,
+  printErr: log,
+  preRun: [() => {
+    for (const f of files) {
+      const dir = f.includes("/") ? "/" + f.slice(0, f.lastIndexOf("/")) : "/";
+      FS.mkdirTree(dir);
+      FS.createPreloadedFile(dir, f.split("/").pop(), f, true, true);
+    }
+  }],
+};
+</script>
+<script src="BattleShip.js"></script>
+</body></html>

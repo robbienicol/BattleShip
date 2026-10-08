@@ -779,7 +779,7 @@ void PortPushFrame(void)
 	port_rollback_synctest_tick();
 	port_widescreen_tick();
 
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__EMSCRIPTEN__)
 #if !defined(BATTLESHIP_UWP)
 	ssb64::enhancements::TickDiscordPresence(); // DRP
 #endif
