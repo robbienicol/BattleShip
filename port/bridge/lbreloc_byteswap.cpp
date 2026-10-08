@@ -19,6 +19,7 @@
 #include "bridge/lbreloc_byteswap.h"
 #include "resource/RelocPointerTable.h"
 #include "resource/RelocFileTable.h"
+#include "rollback/journaled.h"
 
 #include <ship/utils/binarytools/endianness.h>
 #include <spdlog/spdlog.h>
@@ -598,20 +599,20 @@ static void tex_dump_chain(int file_id, uint32_t file_off,
 // pass2 vertex fixups, the chain-walk texture fixup, and the runtime
 // lazy vertex fixup. All paths share this set so they don't undo each
 // other's work. Cleared at scene change via portResetStructFixups.
-static std::unordered_set<uintptr_t> sStructU16Fixups;
+static JournaledSet<uintptr_t> sStructU16Fixups;
 
 // Tracks runtime texture bases that own at least one fixed word, plus the
 // largest request size seen from that base. This preserves the old pass2/chain
 // skip behavior for exact-base matches while sTexFixupWords handles the actual
 // per-word idempotency.
-static std::unordered_map<uintptr_t, unsigned int> sTexFixupExtent;
+static JournaledMap<uintptr_t, unsigned int> sTexFixupExtent;
 
 // Runtime texture/TLUT fixups can overlap even when they start at different
 // addresses. CSS gate palettes are adjacent 0x28-byte blocks, but their Sprite
 // requests a 512-byte TLUT load from each block. Track each u32 word so the
 // second overlapping load skips words fixed by the first instead of BSWAPing
 // them back to the wrong byte order.
-static std::unordered_set<uintptr_t> sTexFixupWords;
+static JournaledSet<uintptr_t> sTexFixupWords;
 
 // Tracks memory ranges of decoded struct arrays that runtime texture/palette
 // BSWAPs must NOT touch. Certain N64 sprite files intentionally overlap the
@@ -629,7 +630,7 @@ static std::vector<ProtectedRange> sProtectedStructRanges;
 // Separate tracking for post-decode 4c sprite deswizzle (portDeswizzleDecodedSprite4c).
 // Needs its own set because portFixupSpriteBitmapData already inserted the same buf
 // addresses during the pre-decode BSWAP32 pass.
-static std::unordered_set<uintptr_t> sDeswizzle4cFixups;
+static JournaledSet<uintptr_t> sDeswizzle4cFixups;
 
 /* Absolute addresses of every tokenized reloc chain slot currently live.
  * Texel data never contains chain slots, so a runtime texture fixup whose
@@ -640,7 +641,7 @@ static std::unordered_set<uintptr_t> sDeswizzle4cFixups;
  * unrecognizable, item spawn walks running off the array into float data
  * → textureless objects, "impossible" token warnings (byte-swapped
  * tokens), and SIGSEGV in gcSetupCustomDObjsWithMObj. */
-static std::unordered_set<uintptr_t> sChainSlotAddrs;
+static JournaledSet<uintptr_t> sChainSlotAddrs;
 
 extern "C" void portRelocNoteChainSlot(const void *slot)
 {
@@ -1058,7 +1059,7 @@ extern "C" void portEvictStructFixupsInRange(const void *begin, size_t size)
 	uintptr_t lo = reinterpret_cast<uintptr_t>(begin);
 	uintptr_t hi = lo + size;
 
-	auto evict_set = [&](std::unordered_set<uintptr_t> &s) {
+	auto evict_set = [&](JournaledSet<uintptr_t> &s) {
 		for (auto it = s.begin(); it != s.end(); ) {
 			if (*it >= lo && *it < hi) it = s.erase(it);
 			else ++it;
@@ -1232,7 +1233,7 @@ static int chain_fixup_settimg(void *file_base, size_t file_size,
 	}
 	auto extent_it = sTexFixupExtent.find(reg_base);
 	if (extent_it == sTexFixupExtent.end() || extent_it->second < tex_bytes)
-		sTexFixupExtent[reg_base] = tex_bytes;
+		sTexFixupExtent.set(reg_base, tex_bytes);
 
 	// Diagnostic: record what was just fixed (chain-walk path).
 	if (tex_log_enabled() || tex_dump_enabled()) {
@@ -1646,7 +1647,7 @@ extern "C" void portRelocFixupTextureAtRuntime(const void *addr, unsigned int nu
 	sStructU16Fixups.insert(target);
 	auto extent_it = sTexFixupExtent.find(target);
 	if (extent_it == sTexFixupExtent.end() || extent_it->second < num_bytes)
-		sTexFixupExtent[target] = num_bytes;
+		sTexFixupExtent.set(target, num_bytes);
 
 	if (tex_log_enabled()) {
 		int rt_file_id = portRelocFindFileIdAndBase(addr, nullptr);
@@ -2297,4 +2298,25 @@ extern "C" void portMarkSyntheticSprite(void *sprite, void *bitmaps,
 			sDeswizzle4cFixups.insert(key);
 		}
 	}
+}
+
+/* Rollback: in-place fixups and their "already fixed" records must rewind
+ * together. A restore that brings back unfixed bytes while keeping the
+ * record would leave them unfixed forever (and vice versa). The sets are
+ * journaled, so a snapshot holds only their log positions. */
+void port_byteswap_fixups_save(RollbackWriter &w)
+{
+	journal_save(w, sStructU16Fixups);
+	journal_save(w, sTexFixupExtent);
+	journal_save(w, sTexFixupWords);
+	journal_save(w, sDeswizzle4cFixups);
+	journal_save(w, sChainSlotAddrs);
+	w.array(sProtectedStructRanges);
+}
+
+bool port_byteswap_fixups_load(RollbackReader &r)
+{
+	return journal_load(r, sStructU16Fixups) && journal_load(r, sTexFixupExtent) &&
+	       journal_load(r, sTexFixupWords) && journal_load(r, sDeswizzle4cFixups) &&
+	       journal_load(r, sChainSlotAddrs) && r.array(sProtectedStructRanges);
 }

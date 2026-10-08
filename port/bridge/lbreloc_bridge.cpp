@@ -1438,3 +1438,26 @@ void lbRelocInitSetup(LBRelocSetup *setup)
 }
 
 } // extern "C"
+
+/* Rollback: the loader's bookkeeping must rewind together with the file
+ * lists (decomp globals) and the arena memory the files were loaded into,
+ * or a restored match would think a file is still loaded at memory that the
+ * restore just cleared. */
+#include "rollback/rollback_io.h"
+
+void port_lbreloc_save(RollbackWriter &w)
+{
+	w.value(sLBRelocInternBuffer);
+	w.value(sLBRelocExternFileIDs);
+	w.value(sLBRelocExternFileIDsNum);
+	w.value(sLBRelocExternFileIDsMax);
+	w.value(sLBRelocExternFileHeap);
+	w.array(sPortRelocFileRanges);
+}
+
+bool port_lbreloc_load(RollbackReader &r)
+{
+	return r.value(sLBRelocInternBuffer) && r.value(sLBRelocExternFileIDs) &&
+	       r.value(sLBRelocExternFileIDsNum) && r.value(sLBRelocExternFileIDsMax) &&
+	       r.value(sLBRelocExternFileHeap) && r.array(sPortRelocFileRanges);
+}

@@ -10,6 +10,7 @@
 #include "port_aobj_fixup.h"
 #include "port_log.h"
 #include "resource/RelocPointerTable.h"
+#include "rollback/journaled.h"
 
 #include <cstdint>
 #include <unordered_set>
@@ -17,8 +18,8 @@
 
 namespace {
 
-std::unordered_set<uintptr_t> sUnswappedHeads;
-std::unordered_set<uintptr_t> sRejectedHeads;  /* walked once, didn't look like EVENT32 — don't retry */
+JournaledSet<uintptr_t> sUnswappedHeads;
+JournaledSet<uintptr_t> sRejectedHeads;  /* walked once, didn't look like EVENT32 — don't retry */
 
 /* Registered fighter-figatree file ranges (base, end).  The walker only
  * operates on head pointers that fall within one of these — this guards
@@ -31,7 +32,7 @@ std::vector<Range> sHalfswappedRanges;
  * spline-data un-halfswap).  Cleared per-range when
  * port_aobj_register_halfswapped_range adds a new range so that
  * figatree-heap reloads at the same address get re-fixed. */
-std::unordered_set<uintptr_t> sUnhalfswappedVisited;
+JournaledSet<uintptr_t> sUnhalfswappedVisited;
 
 bool is_in_halfswapped_range(const void *p) {
     uintptr_t addr = reinterpret_cast<uintptr_t>(p);
@@ -324,7 +325,7 @@ extern "C" void port_aobj_register_halfswapped_range(void *base, unsigned long s
      * anim", leaving TransN.translate at (0,0,0) for the rest of the
      * attack.  Same shape as project_fixup_idempotency_heap_reuse: cache
      * keyed on pointer, heap reuses addresses, fresh bytes skip fixup. */
-    auto evict = [&](std::unordered_set<uintptr_t> &set) {
+    auto evict = [&](JournaledSet<uintptr_t> &set) {
         for (auto it = set.begin(); it != set.end(); ) {
             if (*it >= b && *it < e) it = set.erase(it);
             else ++it;
@@ -361,4 +362,21 @@ extern "C" void port_aobj_event32_unhalfswap_reset(void) {
 
 extern "C" int port_aobj_is_in_halfswapped_range(const void *p) {
     return is_in_halfswapped_range(p) ? 1 : 0;
+}
+
+/* Rollback: these sets record which animation words were already fixed in
+ * place. They rewind together with the animation data so a restored figatree
+ * heap is never fixed twice (or left unfixed). */
+void port_aobj_fixup_save(RollbackWriter &w)
+{
+    journal_save(w, sUnswappedHeads);
+    journal_save(w, sRejectedHeads);
+    journal_save(w, sUnhalfswappedVisited);
+    w.array(sHalfswappedRanges);
+}
+
+bool port_aobj_fixup_load(RollbackReader &r)
+{
+    return journal_load(r, sUnswappedHeads) && journal_load(r, sRejectedHeads) &&
+           journal_load(r, sUnhalfswappedVisited) && r.array(sHalfswappedRanges);
 }

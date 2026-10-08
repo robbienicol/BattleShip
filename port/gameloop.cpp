@@ -26,6 +26,8 @@
 #include "widescreen/widescreen.h"
 #include "port.h"
 #include "port_watchdog.h"
+#include "rollback/rollback_state.h"
+#include "rollback/rollback_session.h"
 #include "hooks/Events.h"
 
 #include <libultraship/libultraship.h>
@@ -111,6 +113,10 @@ static inline OSMesg port_make_os_mesg_int(uint32_t code)
 /* ========================================================================= */
 
 static PortCoroutine *sGameCoroutine = NULL;
+
+/* Non-zero while a tick runs headless (rollback re-simulation): the game
+ * updates but skips its draw pass, audio synthesis and new sound effects. */
+extern "C" int gPortHeadlessTick = 0;
 
 /* VI frame counter (incremented once per PortPushFrame, below). Lives up here
  * so the DL-submission path can stamp diagnostics with it. */
@@ -680,6 +686,48 @@ static void port_screenshot_maybe_capture(int frame)
 	}
 }
 
+/* Runs one game tick with no rendering, audio or VI/frame pacing. Message
+ * flow (VRETRACE -> scheduler -> controller -> game) is the same as a normal
+ * tick so the simulation advances exactly as it would have on screen. */
+extern "C" void PortRunHeadlessTick(void)
+{
+	gPortHeadlessTick = 1;
+	osSendMesg(&gSYSchedulerTaskMesgQueue, port_make_os_mesg_int(INTR_VRETRACE), OS_MESG_NOBLOCK);
+	port_resume_service_threads();
+	port_enhancement_stage_hazards_tick();
+	gPortHeadlessTick = 0;
+}
+
+/* Runs one normal game tick: VI vblank, VRETRACE, coroutine resume. The
+ * draw pass inside the tick stages a display list that PortPushFrame
+ * renders afterwards. */
+extern "C" void PortRunRenderedTick(void)
+{
+	port_vi_simulate_vblank();
+
+	/* Post a VI retrace event to the scheduler's message queue. See
+	 * port_make_os_mesg_int() above for why we don't just write
+	 * `(OSMesg)INTR_VRETRACE` here. */
+	osSendMesg(&gSYSchedulerTaskMesgQueue, port_make_os_mesg_int(INTR_VRETRACE), OS_MESG_NOBLOCK);
+
+	/* TCC mod hook: GamePreUpdateEvent fires once per frame BEFORE the
+	 * per-frame coroutine resume. Listeners run on the main thread with
+	 * the game in an inert state — safe to read but mutating game data
+	 * from here races with the about-to-start game tick. Use Post for
+	 * mutations that should land "after this frame's logic." */
+	CALL_EVENT(GamePreUpdateEvent);
+
+	/* Resume all service thread coroutines that are waiting for messages.
+	 * This runs multiple rounds to handle cascading messages:
+	 *   Round 1: Scheduler picks up VRETRACE, sends ticks to clients
+	 *   Round 2: Controller reads input, game logic runs one frame
+	 *   Round 3+: Display list submitted, scheduler processes GFX task, etc.
+	 * Each thread runs until it yields at osRecvMesg(BLOCK) on empty queue. */
+	port_resume_service_threads();
+
+	port_enhancement_stage_hazards_tick();
+}
+
 void PortPushFrame(void)
 {
 	// Process cheats safely before the frame updates
@@ -707,29 +755,28 @@ void PortPushFrame(void)
 	 * intros and the desk-to-stage transition would never appear. Run
 	 * this BEFORE posting INTR_VRETRACE so old gfx completions are
 	 * delivered before the next game tick can tear down scene memory. */
-	port_vi_simulate_vblank();
+	/* SSB64_HEADLESS_EVERY=N (test): before every Nth tick, run an extra
+	 * headless tick. A replay's state trace must match a normal run. */
+	{
+		static int sHeadlessEvery = -1;
+		if (sHeadlessEvery < 0) {
+			const char *env = std::getenv("SSB64_HEADLESS_EVERY");
+			sHeadlessEvery = (env != nullptr) ? std::atoi(env) : 0;
+		}
+		if (sHeadlessEvery > 0 && (sFrameCount % sHeadlessEvery) == sHeadlessEvery - 1) {
+			PortRunHeadlessTick();
+		}
+	}
 
-	/* Post a VI retrace event to the scheduler's message queue. See
-	 * port_make_os_mesg_int() above for why we don't just write
-	 * `(OSMesg)INTR_VRETRACE` here. */
-	osSendMesg(&gSYSchedulerTaskMesgQueue, port_make_os_mesg_int(INTR_VRETRACE), OS_MESG_NOBLOCK);
+	/* A rollback netplay session decides how many ticks run this frame
+	 * (none while waiting on the network, several when re-simulating).
+	 * Otherwise run exactly one tick. */
+	if (!port_rollback_session_frame()) {
+		PortRunRenderedTick();
+	}
 
-	/* TCC mod hook: GamePreUpdateEvent fires once per frame BEFORE the
-	 * per-frame coroutine resume. Listeners run on the main thread with
-	 * the game in an inert state — safe to read but mutating game data
-	 * from here races with the about-to-start game tick. Use Post for
-	 * mutations that should land "after this frame's logic." */
-	CALL_EVENT(GamePreUpdateEvent);
-
-	/* Resume all service thread coroutines that are waiting for messages.
-	 * This runs multiple rounds to handle cascading messages:
-	 *   Round 1: Scheduler picks up VRETRACE, sends ticks to clients
-	 *   Round 2: Controller reads input, game logic runs one frame
-	 *   Round 3+: Display list submitted, scheduler processes GFX task, etc.
-	 * Each thread runs until it yields at osRecvMesg(BLOCK) on empty queue. */
-	port_resume_service_threads();
-
-	port_enhancement_stage_hazards_tick();
+	port_rollback_probe_tick();
+	port_rollback_synctest_tick();
 	port_widescreen_tick();
 
 #if !defined(__ANDROID__)

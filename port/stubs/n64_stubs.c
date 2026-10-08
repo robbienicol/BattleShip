@@ -192,8 +192,11 @@ void osStartThread(OSThread *t)
 
 	/* Create the coroutine lazily on first start. */
 	if (t->port_coroutine == NULL && t->port_entry != NULL) {
-		size_t stack_size = (t->id < 100) ? PORT_STACK_SERVICE : PORT_STACK_GOBJ;
-		t->port_coroutine = port_coroutine_create(t->port_entry, t->port_arg, stack_size);
+		/* GObj thread processes (countdown, announcer, ...) come from the
+		 * coroutine pool so rollback snapshots can capture them. */
+		t->port_coroutine = (t->id < 100)
+			? port_coroutine_create(t->port_entry, t->port_arg, PORT_STACK_SERVICE)
+			: port_coroutine_pool_acquire(t->port_entry, t->port_arg, PORT_STACK_GOBJ);
 		if (t->port_coroutine == NULL) {
 			port_log( "SSB64: failed to create coroutine for thread %d\n", (int)t->id);
 			return;
@@ -229,7 +232,7 @@ void osDestroyThread(OSThread *t)
 		return;
 	}
 	if (t->port_coroutine != NULL) {
-		port_coroutine_destroy((PortCoroutine *)t->port_coroutine);
+		port_coroutine_pool_release((PortCoroutine *)t->port_coroutine);
 		t->port_coroutine = NULL;
 	}
 	t->port_entry = NULL;

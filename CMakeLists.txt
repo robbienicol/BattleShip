@@ -726,6 +726,20 @@ endif()
 
 add_library(ssb64_game OBJECT ${SSB64_DECOMP_SOURCES})
 
+# Rollback: group the decomp game globals into dedicated sections so the
+# simulation state can be snapshotted as contiguous memory ranges.
+# -fno-common makes tentative definitions real so the section pragma applies.
+if(APPLE)
+    set_property(SOURCE ${SSB64_DECOMP_SOURCES} APPEND PROPERTY COMPILE_OPTIONS
+        "-include;${CMAKE_CURRENT_SOURCE_DIR}/port/rollback/sections.h")
+    # Engine plumbing whose globals must never be restored.
+    set(SSB64_ROLLBACK_NOSNAP_SOURCES ${SSB64_DECOMP_SOURCES})
+    list(FILTER SSB64_ROLLBACK_NOSNAP_SOURCES INCLUDE REGEX
+        "decomp/src/sys/(audio|controller|debug|dma|framebuffer|main|maindevice|netpeer|netreplay|rdp|scheduler|taskman|video|zbuffer)\\.c$")
+    set_property(SOURCE ${SSB64_ROLLBACK_NOSNAP_SOURCES} APPEND PROPERTY COMPILE_DEFINITIONS SSB64_ROLLBACK_NOSNAP=1)
+    target_compile_options(ssb64_game PRIVATE -fno-common)
+endif()
+
 # Port stub definitions (C code that satisfies N64 linker symbols)
 file(GLOB SSB64_STUBS "port/stubs/*.c")
 target_sources(ssb64_game PRIVATE ${SSB64_STUBS})
@@ -982,6 +996,19 @@ endif()
 if (APPLE)
     target_link_libraries(${PROJECT_NAME} PRIVATE "-framework CoreFoundation")
 endif()
+
+# Rollback netcode: GekkoNet (BSD-2-Clause), vendored at third_party/GekkoNet
+# (see its VERSION file for the upstream commit). Built without ASIO: the
+# port supplies its own transport (UDP natively, WebRTC on the web).
+file(GLOB GEKKONET_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/third_party/GekkoNet/src/*.cpp)
+add_library(gekkonet STATIC ${GEKKONET_SOURCES})
+target_include_directories(gekkonet
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/GekkoNet/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/GekkoNet/include/private
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/GekkoNet/thirdparty)
+target_compile_definitions(gekkonet PUBLIC GEKKONET_NO_ASIO GEKKONET_STATIC)
+target_compile_features(gekkonet PUBLIC cxx_std_20)
+target_link_libraries(${PROJECT_NAME} PRIVATE gekkonet)
 add_dependencies(ssb64_game GenerateCreditsAssets)
 if (NOT DISABLE_SCRIPTING)
     # funchook hook backend (libultraship is already linked above).

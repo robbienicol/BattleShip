@@ -70,6 +70,32 @@ int port_coroutine_is_finished(PortCoroutine *co);
  */
 int port_coroutine_in_coroutine(void);
 
+/* ---- Pooled coroutines (rollback support) ----
+ *
+ * Short-lived coroutines (GObj thread processes such as the VS countdown)
+ * come from a fixed pool whose stacks are never freed, so their full state
+ * — saved registers plus stack contents — can be captured in a rollback
+ * snapshot and put back later, even if the coroutine was destroyed or a
+ * different one occupies the slot in between.
+ */
+
+/* Like port_coroutine_create, but from the pool. NULL if the pool is full. */
+PortCoroutine *port_coroutine_pool_acquire(void (*entry)(void *), void *arg, size_t stack_size);
+
+/* Returns a pooled coroutine to the pool (instead of port_coroutine_destroy). */
+void port_coroutine_pool_release(PortCoroutine *co);
+
+/* Non-zero if co came from the pool. */
+int port_coroutine_is_pooled(PortCoroutine *co);
+
+/* Serializes every live pooled coroutine. Returns bytes written, or 0 if
+ * cap is too small or pooling is unsupported on this platform. */
+size_t port_coroutine_pool_save(unsigned char *buf, size_t cap);
+
+/* Restores the pool to a state written by port_coroutine_pool_save.
+ * Must be called from the main thread (no coroutine running). */
+int port_coroutine_pool_load(const unsigned char *buf, size_t len);
+
 #ifdef __cplusplus
 }
 #endif
