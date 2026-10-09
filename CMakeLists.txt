@@ -522,6 +522,7 @@ file(GLOB_RECURSE SSB64_SRC_WP      "decomp/src/wp/*.c"      "decomp/src/wp/*.h"
 # link error against a stale glob.
 file(GLOB_RECURSE SSB64_SRC_PORT CONFIGURE_DEPENDS "port/*.cpp" "port/*.c" "port/*.h")
 list(FILTER SSB64_SRC_PORT EXCLUDE REGEX "port/stubs/")
+list(FILTER SSB64_SRC_PORT EXCLUDE REGEX "port/rollback/markers/")
 # RelocFileTable.{us,jp}.cpp both define gRelocFileTable — compile only the
 # selected version's table (the rest are siblings for the other version).
 list(FILTER SSB64_SRC_PORT EXCLUDE REGEX "port/resource/RelocFileTable\\.(us|jp)\\.cpp$")
@@ -748,6 +749,21 @@ if(APPLE)
         "decomp/src/sys/(audio|controller|debug|dma|framebuffer|main|maindevice|netpeer|netreplay|rdp|scheduler|taskman|video|zbuffer)\\.c$")
     set_property(SOURCE ${SSB64_ROLLBACK_NOSNAP_SOURCES} APPEND PROPERTY COMPILE_DEFINITIONS SSB64_ROLLBACK_NOSNAP=1)
     target_compile_options(ssb64_game PRIVATE -fno-common)
+elseif(EMSCRIPTEN)
+    set_property(SOURCE ${SSB64_DECOMP_SOURCES} APPEND PROPERTY COMPILE_OPTIONS
+        "-include;${CMAKE_CURRENT_SOURCE_DIR}/port/rollback/sections.h")
+    set(SSB64_ROLLBACK_NOSNAP_SOURCES ${SSB64_DECOMP_SOURCES})
+    list(FILTER SSB64_ROLLBACK_NOSNAP_SOURCES INCLUDE REGEX
+        "decomp/src/sys/(audio|controller|debug|dma|framebuffer|main|maindevice|netpeer|netreplay|rdp|scheduler|taskman|video|zbuffer)\\.c$")
+    set_property(SOURCE ${SSB64_ROLLBACK_NOSNAP_SOURCES} APPEND PROPERTY COMPILE_DEFINITIONS SSB64_ROLLBACK_NOSNAP=1)
+    target_compile_options(ssb64_game PRIVATE -fno-common)
+    # wasm-ld has no section start/stop symbols: bracket the snapshot data
+    # with markers linked before and after every decomp object.
+    get_target_property(SSB64_GAME_SOURCES ssb64_game SOURCES)
+    set_property(TARGET ssb64_game PROPERTY SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/port/rollback/markers/begin.c
+        ${SSB64_GAME_SOURCES}
+        ${CMAKE_CURRENT_SOURCE_DIR}/port/rollback/markers/end.c)
 endif()
 
 # Port stub definitions (C code that satisfies N64 linker symbols)

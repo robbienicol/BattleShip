@@ -15,4 +15,11 @@
 #else
 #pragma clang section bss = "__DATA,__ssbbss" data = "__DATA,__ssbdata"
 #endif
+#elif defined(__EMSCRIPTEN__)
+/* wasm-ld keeps custom-named data segments together in link order but emits
+ * no start/stop symbols; port/rollback/markers/ supplies the bounds. Engine
+ * plumbing simply stays in the normal .data/.bss. */
+#if !defined(SSB64_ROLLBACK_NOSNAP)
+#pragma clang section bss = "ssbbss" data = "ssbdata"
+#endif
 #endif

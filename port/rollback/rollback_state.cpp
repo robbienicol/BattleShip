@@ -35,6 +35,10 @@ extern char sRollbackDataStart __asm("section$start$__DATA$__ssbdata");
 extern char sRollbackDataEnd __asm("section$end$__DATA$__ssbdata");
 extern char sRollbackBssStart __asm("section$start$__DATA$__ssbbss");
 extern char sRollbackBssEnd __asm("section$end$__DATA$__ssbbss");
+#elif defined(__EMSCRIPTEN__)
+/* port/rollback/markers/: linked first and last among the snapshot sources. */
+extern char ssb_snapshot_begin_data, ssb_snapshot_begin_bss;
+extern char ssb_snapshot_end_data, ssb_snapshot_end_bss;
 #endif
 
 /* Mirrors SYMallocRegion (decomp/src/sys/malloc.h). */
@@ -85,6 +89,18 @@ const std::vector<Range> &SectionRanges()
 #if defined(__APPLE__)
 	whole.push_back({ (uint8_t *)&sRollbackDataStart, (size_t)(&sRollbackDataEnd - &sRollbackDataStart), "data" });
 	whole.push_back({ (uint8_t *)&sRollbackBssStart, (size_t)(&sRollbackBssEnd - &sRollbackBssStart), "bss" });
+#elif defined(__EMSCRIPTEN__)
+	{
+		uint8_t *ds = (uint8_t *)&ssb_snapshot_begin_data, *de = (uint8_t *)&ssb_snapshot_end_data + 1;
+		uint8_t *bs = (uint8_t *)&ssb_snapshot_begin_bss, *be = (uint8_t *)&ssb_snapshot_end_bss + 1;
+		if (ds < be && bs < de) { /* one merged segment */
+			uint8_t *lo = std::min(ds, bs), *hi = std::max(de, be);
+			whole.push_back({ lo, (size_t)(hi - lo), "data" });
+		} else {
+			whole.push_back({ ds, (size_t)(de - ds), "data" });
+			whole.push_back({ bs, (size_t)(be - bs), "bss" });
+		}
+	}
 #endif
 	std::vector<Range> excludes;
 	for (int i = 0; i < gPortRollbackExcludesCount; i++) {

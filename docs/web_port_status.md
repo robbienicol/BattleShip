@@ -53,11 +53,27 @@ it there:
   syscall in the browser; it is a heap-bounds check there now.
 - Texture fixups skip per-word work for textures already fixed at that size.
 
+## Rollback snapshots in the browser (2026-10-08): verified
+
+- Game globals: wasm-ld emits no section start/stop symbols, but keeps the
+  custom `ssbdata`/`ssbbss` segments together in link order, so
+  port/rollback/markers/begin.c and end.c (first and last ssb64_game
+  sources) bracket them. Engine plumbing stays in normal .data/.bss.
+- Coroutines: pooled fibers (port/coroutine_emscripten.cpp) keep their C
+  stack and Asyncify buffer for life; a snapshot copies the fiber struct, the
+  live C stack (stack_ptr..top) and the used Asyncify buffer.
+- Sync test in the browser (depth 7, every tick, 1800-frame replay):
+  12,915 rollbacks, 0 hash/byte mismatches, replay verify PASS. Save
+  ~0.04 ms, load ~0.16 ms, 7-frame re-simulation ~1.2 ms, state ~1.2 MB.
+
+Run it: build-web/test.html?SSB64_SYNCTEST=7&SSB64_REPLAY_PLAY=/test.ssb64r&preload=test.ssb64r
+(make the replay with debug_tools/rollback/make_replay.py build-web/test.ssb64r).
+
 ## Next
 
-1. Input (keyboard/gamepad via SDL in the browser) and audio output checks
+1. WebRTC DataChannel transport for GekkoNet; hook into ssb64-web
+   matchmaking (site picks fighters/stage, game jumps into the battle).
+2. Input (keyboard/gamepad via SDL in the browser) and audio output checks
    on a visible page; asset extraction from the player's ROM in the browser
    (Torch has an Emscripten build mode) instead of preloading files.
-2. Rollback on the web: fiber-aware coroutine pool save/load, WebRTC
-   DataChannel transport for GekkoNet, hook into ssb64-web matchmaking.
 3. Release build flags (drop -sASSERTIONS/--profiling-funcs), size/startup.
