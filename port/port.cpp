@@ -9,6 +9,55 @@
 #include <emscripten.h>
 extern "C" double gPortWebPerfTickMs, gPortWebPerfDrawMs; /* port/gameloop.cpp */
 extern "C" int gPortWebDraws, gPortWebTexUploads, gPortWebReadbacks; /* gfx_opengl.cpp */
+
+/* Browser frame pacing: yield to the page (Asyncify) and resume on the next
+ * display refresh that is due a 60 Hz game frame. Running inside the
+ * animation-frame callback puts each game frame on its own vsync (timers
+ * drift against the display and stutter). Displays above 60 Hz skip refreshes
+ * with a time accumulator. rAF stops in hidden tabs, so a timer keeps the game
+ * (and an online opponent) going there. */
+EM_ASYNC_JS(void, port_web_wait_frame, (), {
+	var step = 1000 / 60;
+	var pace = Module.__pace || (Module.__pace = { last: performance.now(), acc: 0, next: 0 });
+	await new Promise(function(resolve) {
+		var done = false;
+		var timer = 0;
+		function run() {
+			if (done) return;
+			done = true;
+			clearTimeout(timer);
+			resolve();
+		}
+		function onFrame() {
+			if (done) return;
+			var now = performance.now();
+			pace.acc += now - pace.last;
+			pace.last = now;
+			if (pace.acc > step * 3) pace.acc = step; /* after a stall: no burst */
+			if (pace.acc >= step - 2) {
+				pace.acc = Math.max(0, pace.acc - step);
+				run();
+			} else {
+				requestAnimationFrame(onFrame);
+			}
+		}
+		function onTimer() {
+			pace.acc = 0;
+			pace.last = performance.now();
+			run();
+		}
+		if (document.hidden) {
+			/* Fixed 60 Hz schedule, so timer slop doesn't slow the game. */
+			var now = performance.now();
+			pace.next = (pace.next && now - pace.next < step * 3) ? pace.next + step : now + step;
+			timer = setTimeout(onTimer, Math.max(0, pace.next - now));
+		} else {
+			pace.next = 0;
+			requestAnimationFrame(onFrame);
+			timer = setTimeout(onTimer, 100); /* rAF throttled (occluded window) */
+		}
+	});
+});
 #endif
 #include "port.h"
 #include "gameloop.h"
@@ -1417,11 +1466,7 @@ int main(int argc, char* argv[]) {
 	}
 	int frame = 0;
 	bool firstRunHintShown = false;
-#if defined(__EMSCRIPTEN__)
-	/* Browser: after each frame, yield to the page until the next 60 Hz slot
-	 * (Asyncify unwinds back to the event loop and resumes here). */
-	double nextFrameMs = emscripten_get_now();
-#endif
+
 	while (WindowIsRunning()) {
 #if defined(__EMSCRIPTEN__)
 		double frameStartMs = emscripten_get_now();
@@ -1445,12 +1490,7 @@ int main(int argc, char* argv[]) {
 				gPortWebDraws = gPortWebTexUploads = gPortWebReadbacks = 0;
 			}
 		}
-		nextFrameMs += 1000.0 / 60.0;
-		double now = emscripten_get_now();
-		if (nextFrameMs < now - 100.0) {
-			nextFrameMs = now; /* fell far behind (tab hidden): don't burst */
-		}
-		emscripten_sleep((unsigned)(nextFrameMs > now ? nextFrameMs - now : 0));
+		port_web_wait_frame();
 #endif
 
 		if (!firstRunHintShown && frame == 60) {

@@ -235,6 +235,19 @@ EM_JS(int, web_net_pop, (char *peer, int peer_cap, char *buf, int cap), {
 	return n;
 });
 
+/* The page may supply this player's controller state itself
+ * (Module.readPad() -> { buttons, x, y } in N64 terms), so the site's own
+ * controller mapping applies online. Returns 0 to fall back to libultraship. */
+EM_JS(int, web_read_pad, (uint16_t *buttons, int8_t *stick_x, int8_t *stick_y), {
+	if (!Module.readPad) return 0;
+	var pad = Module.readPad();
+	if (!pad) return 0;
+	HEAPU16[buttons >> 1] = pad.buttons & 0xffff;
+	HEAP8[stick_x] = pad.x;
+	HEAP8[stick_y] = pad.y;
+	return 1;
+});
+
 void WebSend(GekkoNetAddress *addr, const char *data, int length)
 {
 	web_net_send((const char *)addr->data, (int)addr->size, data, length);
@@ -540,9 +553,15 @@ NetInput LocalInput()
 		}
 		return in;
 	}
+	/* No pausing online: Start would freeze the match for everyone. */
+#if defined(__EMSCRIPTEN__)
+	if (web_read_pad(&in.buttons, &in.stick_x, &in.stick_y)) {
+		in.buttons &= (uint16_t)~kStartButton;
+		return in;
+	}
+#endif
 	PortContPad pads[4] = {};
 	osContGetReadData(pads);
-	/* No pausing online: Start would freeze the match for everyone. */
 	in.buttons = pads[0].button & (uint16_t)~kStartButton;
 	in.stick_x = pads[0].stick_x;
 	in.stick_y = pads[0].stick_y;
