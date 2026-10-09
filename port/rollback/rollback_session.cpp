@@ -73,6 +73,10 @@ int syNetReplayGetLoadedFrame(int player, unsigned int tick, PortNetInputFrame *
 int syNetReplayDescribeResults(char *buf, int cap);
 int syNetReplayGetGameStatus(void);
 unsigned int syNetReplayQuickChecksum(void);
+#if defined(__EMSCRIPTEN__)
+extern double gPortWebWorkMs; /* port/gameloop.cpp */
+extern int gPortWebWorkFrames, gPortWebSkippedDraws;
+#endif
 
 /* Mirrors SYNetSyncTickHash (decomp/src/sys/netsync.h). */
 struct PortSessionTickHash {
@@ -731,9 +735,21 @@ extern "C" int port_rollback_session_frame(void)
 	if (sStarted && (sFrames % 120) == 0) {
 		GekkoNetworkStats stats{};
 		gekko_network_stats(sSession, sConfig.local == 0 ? 1 : 0, &stats);
-		char detail[128];
-		std::snprintf(detail, sizeof(detail), "{\"ping\":%u,\"rollbacks\":%u,\"stalls\":%u}", stats.last_ping,
-		              sRollbacks, sStalls);
+		char detail[192];
+#if defined(__EMSCRIPTEN__)
+		/* Browser frame cost and catch-up draws since the last report. */
+		double work = gPortWebWorkFrames > 0 ? gPortWebWorkMs / gPortWebWorkFrames : 0.0;
+		int skipped = gPortWebSkippedDraws;
+		gPortWebWorkMs = 0;
+		gPortWebWorkFrames = gPortWebSkippedDraws = 0;
+#else
+		double work = 0.0;
+		int skipped = 0;
+#endif
+		std::snprintf(detail, sizeof(detail),
+		              "{\"frame\":%u,\"ping\":%u,\"rollbacks\":%u,\"stalls\":%u,\"ahead\":%.2f,\"work\":%.2f,"
+		              "\"skipped\":%d}",
+		              sFrames, stats.last_ping, sRollbacks, sStalls, gekko_frames_ahead(sSession), work, skipped);
 		web_game_event("stats", detail);
 	}
 	if (sStarted && (sFrames % 600) == 0) {

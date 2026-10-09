@@ -9,33 +9,39 @@
 #include <emscripten.h>
 extern "C" double gPortWebPerfTickMs, gPortWebPerfDrawMs; /* port/gameloop.cpp */
 extern "C" int gPortWebDraws, gPortWebTexUploads, gPortWebReadbacks; /* gfx_opengl.cpp */
+extern "C" int gPortSkipDrawTick, gPortWebWorkFrames, gPortWebSkippedDraws; /* port/gameloop.cpp */
+extern "C" double gPortWebWorkMs;
 
 /* Browser frame pacing: yield to the page (Asyncify) and resume on the next
- * display refresh that is due a 60 Hz game frame. Running inside the
+ * display refresh that is due a 60 Hz game frame; returns how many game
+ * frames are due (more than 1 after a slow frame: the extra ones run without
+ * drawing so the game keeps full speed). Running inside the
  * animation-frame callback puts each game frame on its own vsync (timers
  * drift against the display and stutter). Displays above 60 Hz skip refreshes
  * with a time accumulator. rAF stops in hidden tabs, so a timer keeps the game
  * (and an online opponent) going there. */
-EM_ASYNC_JS(void, port_web_wait_frame, (), {
+EM_ASYNC_JS(int, port_web_wait_frame, (), {
 	var step = 1000 / 60;
-	var pace = Module.__pace || (Module.__pace = { last: performance.now(), acc: 0, next: 0 });
-	await new Promise(function(resolve) {
+	var pace = Module.__pace || (Module.__pace = { last: performance.now(), acc: 0, next: 0, due: 1 });
+	return await new Promise(function(resolve) {
 		var done = false;
 		var timer = 0;
 		function run() {
 			if (done) return;
 			done = true;
 			clearTimeout(timer);
-			resolve();
+			resolve(pace.due);
 		}
 		function onFrame() {
 			if (done) return;
 			var now = performance.now();
 			pace.acc += now - pace.last;
 			pace.last = now;
-			if (pace.acc > step * 3) pace.acc = step; /* after a stall: no burst */
+			if (pace.acc > step * 4) pace.acc = step; /* after a long stall: no burst */
 			if (pace.acc >= step - 2) {
-				pace.acc = Math.max(0, pace.acc - step);
+				/* Usually 1; 2-3 when the last frame ran long, so game speed holds. */
+				pace.due = Math.min(3, Math.max(1, Math.floor((pace.acc + 2) / step)));
+				pace.acc = Math.max(0, pace.acc - pace.due * step);
 				run();
 			} else {
 				requestAnimationFrame(onFrame);
@@ -43,6 +49,7 @@ EM_ASYNC_JS(void, port_web_wait_frame, (), {
 		}
 		function onTimer() {
 			pace.acc = 0;
+			pace.due = 1;
 			pace.last = performance.now();
 			run();
 		}
@@ -1467,9 +1474,20 @@ int main(int argc, char* argv[]) {
 	int frame = 0;
 	bool firstRunHintShown = false;
 
+#if defined(__EMSCRIPTEN__)
+	int webFramesDue = 1;
+#endif
 	while (WindowIsRunning()) {
 #if defined(__EMSCRIPTEN__)
 		double frameStartMs = emscripten_get_now();
+		/* Catch-up frames: full game tick, no draw. */
+		for (int i = 1; i < webFramesDue; i++) {
+			gPortSkipDrawTick = 1;
+			PortPushFrame();
+			gPortSkipDrawTick = 0;
+			gPortWebSkippedDraws++;
+			frame++;
+		}
 #endif
 		PortPushFrame();
 		frame++;
@@ -1478,9 +1496,12 @@ int main(int argc, char* argv[]) {
 			/* Browser perf: average compute time per frame, every 600 frames. */
 			static double sSumMs = 0, sMaxMs = 0;
 			double ms = emscripten_get_now() - frameStartMs;
+			gPortWebWorkMs += ms;
+			gPortWebWorkFrames++;
 			sSumMs += ms;
 			if (ms > sMaxMs) sMaxMs = ms;
-			if (frame % 600 == 0) {
+			static int sPerfLoops = 0;
+			if (++sPerfLoops % 600 == 0) {
 				port_log("SSB64 WebPerf: frames=%d avg=%.2fms max=%.2fms (tick %.2fms, draw %.2fms) per frame: "
 				         "draws=%d tex_uploads=%d readbacks=%d\n", frame, sSumMs / 600.0, sMaxMs,
 				         gPortWebPerfTickMs / 600.0, gPortWebPerfDrawMs / 600.0, gPortWebDraws / 600,
@@ -1490,7 +1511,7 @@ int main(int argc, char* argv[]) {
 				gPortWebDraws = gPortWebTexUploads = gPortWebReadbacks = 0;
 			}
 		}
-		port_web_wait_frame();
+		webFramesDue = port_web_wait_frame();
 #endif
 
 		if (!firstRunHintShown && frame == 60) {

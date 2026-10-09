@@ -120,6 +120,12 @@ static PortCoroutine *sGameCoroutine = NULL;
 /* Non-zero while a tick runs headless (rollback re-simulation): the game
  * updates but skips its draw pass, audio synthesis and new sound effects. */
 extern "C" int gPortHeadlessTick = 0;
+/* Browser: run the tick (game + audio) but skip its draw pass, to catch up
+ * after a frame that took too long without slowing the game down. */
+extern "C" int gPortSkipDrawTick = 0;
+/* Browser perf, read and reset by the rollback session's stats event. */
+extern "C" double gPortWebWorkMs = 0;
+extern "C" int gPortWebWorkFrames = 0, gPortWebSkippedDraws = 0;
 
 #if defined(__EMSCRIPTEN__)
 #include <emscripten.h>
