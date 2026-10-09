@@ -54,11 +54,32 @@ EM_ASYNC_JS(int, port_web_wait_frame, (), {
 			run();
 		}
 		if (document.hidden) {
-			/* Fixed 60 Hz schedule, so timer slop doesn't slow the game. */
+			/* Fixed 60 Hz schedule driven by a worker: page timers in hidden
+			 * tabs are throttled to about once a second, which would freeze an
+			 * online opponent; worker timers keep running. */
 			var now = performance.now();
 			pace.next = (pace.next && now - pace.next < step * 3) ? pace.next + step : now + step;
-			timer = setTimeout(onTimer, Math.max(0, pace.next - now));
+			if (!Module.__paceWorker) {
+				try {
+					Module.__paceWorker = new Worker(URL.createObjectURL(new Blob(
+						["setInterval(function(){postMessage(0)},4)"], { type: "text/javascript" })));
+				} catch (e) {
+					Module.__paceWorker = null;
+				}
+			}
+			var worker = Module.__paceWorker;
+			if (worker) {
+				worker.onmessage = function() {
+					if (performance.now() >= pace.next - 1) {
+						worker.onmessage = null;
+						onTimer();
+					}
+				};
+			} else {
+				timer = setTimeout(onTimer, Math.max(0, pace.next - now));
+			}
 		} else {
+			if (Module.__paceWorker) Module.__paceWorker.onmessage = null;
 			pace.next = 0;
 			requestAnimationFrame(onFrame);
 			timer = setTimeout(onTimer, 100); /* rAF throttled (occluded window) */
