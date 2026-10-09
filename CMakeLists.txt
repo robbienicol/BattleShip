@@ -1031,8 +1031,12 @@ if (EMSCRIPTEN)
         -sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2 -sFULL_ES3=1
         -sASYNCIFY -sASYNCIFY_STACK_SIZE=262144
         -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=268435456 -sSTACK_SIZE=2097152
-        -sFORCE_FILESYSTEM=1 -sEXIT_RUNTIME=0
-        -sASSERTIONS=1 --profiling-funcs)
+        -sFORCE_FILESYSTEM=1 -sEXIT_RUNTIME=0)
+    # -DSSB64_WEB_DEBUG=ON: runtime assertions and function names in stack traces.
+    option(SSB64_WEB_DEBUG "Browser build: Emscripten assertions + profiling names" OFF)
+    if (SSB64_WEB_DEBUG)
+        target_link_options(${PROJECT_NAME} PRIVATE -sASSERTIONS=1 --profiling-funcs)
+    endif()
     set_target_properties(${PROJECT_NAME} PROPERTIES SUFFIX ".html")
 endif()
 

@@ -71,6 +71,8 @@ struct PortNetInputFrame {
 };
 int syNetReplayGetLoadedFrame(int player, unsigned int tick, PortNetInputFrame *out);
 int syNetReplayDescribeResults(char *buf, int cap);
+int syNetReplayGetGameStatus(void);
+unsigned int syNetReplayQuickChecksum(void);
 
 /* Mirrors SYNetSyncTickHash (decomp/src/sys/netsync.h). */
 struct PortSessionTickHash {
@@ -97,6 +99,7 @@ namespace {
 constexpr unsigned char kSceneVSBattle = 22;
 constexpr int kSourceSaved = 3; /* nSYNetInputSourceSaved */
 constexpr unsigned kStateCapacity = 4 * 1024 * 1024;
+constexpr uint16_t kStartButton = 0x1000; /* N64 START_BUTTON */
 
 /* What travels over the network per player per frame. */
 struct NetInput {
@@ -125,6 +128,10 @@ GekkoSession *sSession = nullptr;
 bool sStarted = false;
 RollbackBuffer sSaveScratch;
 unsigned sFrames = 0, sRollbacks = 0, sResimTicks = 0, sStalls = 0, sDesyncs = 0;
+/* First rendered frame of the current "battle decided" streak, or -1. */
+int sDecidedSince = -1;
+int sLastRenderedFrame = -1;
+bool sSawFighting = false;
 
 /* Bad-network simulation settings (see the UDP transport below). */
 int sSimLatency = 0, sSimJitter = 0, sSimLoss = 0;
@@ -425,11 +432,25 @@ bool InVSBattle()
 	return gSCManagerSceneData == kSceneVSBattle && gPortArenaSimStart != nullptr;
 }
 
+/* GekkoNet compares this between peers to detect desyncs. The full gameplay
+ * hash (syNetSyncHashTick) walks object lists and is not safe while the game
+ * removes eliminated fighters, so a plain battle-state checksum is used. */
+/* Decided = the fight has started and is no longer in play (GAME SET or
+ * TIME UP; the status goes End, then Wait, until the scene ends). */
+bool BattleDecided()
+{
+	constexpr int kStatusGo = 1, kStatusPause = 2, kStatusUnpause = 3;
+	int status = syNetReplayGetGameStatus();
+	if (status == kStatusGo) {
+		sSawFighting = true;
+		return false;
+	}
+	return sSawFighting && status != kStatusPause && status != kStatusUnpause;
+}
+
 uint32_t StateChecksum()
 {
-	PortSessionTickHash h;
-	syNetSyncHashTick(&h);
-	return h.column[0]; /* folded hash of every gameplay column */
+	return syNetReplayQuickChecksum();
 }
 
 void EndSession(const char *why)
@@ -497,6 +518,8 @@ bool StartSession()
 		syNetInputSetSlotSource(p, kSourceSaved);
 	}
 	sFrames = sRollbacks = sResimTicks = sStalls = sDesyncs = 0;
+	sDecidedSince = sLastRenderedFrame = -1;
+	sSawFighting = false;
 	port_log("SSB64 Rollback: session created players=%d local=%d peers=%s delay=%d window=%d scripted=%d\n",
 	         sConfig.players, sConfig.local, peers.c_str(), sConfig.delay, sConfig.window, sConfig.scripted ? 1 : 0);
 	return true;
@@ -519,7 +542,8 @@ NetInput LocalInput()
 	}
 	PortContPad pads[4] = {};
 	osContGetReadData(pads);
-	in.buttons = pads[0].button;
+	/* No pausing online: Start would freeze the match for everyone. */
+	in.buttons = pads[0].button & (uint16_t)~kStartButton;
 	in.stick_x = pads[0].stick_x;
 	in.stick_y = pads[0].stick_y;
 	return in;
@@ -613,6 +637,17 @@ void HandleGameEvents()
 				sResimTicks++;
 			} else {
 				PortRunRenderedTick();
+				/* Track how long the shown timeline has had the battle decided;
+				 * a rollback that undoes the deciding KO resets it. */
+				sLastRenderedFrame = (int)frame;
+				if (BattleDecided()) {
+					if (sDecidedSince < 0) {
+						sDecidedSince = (int)frame;
+						port_log("SSB64 Rollback: battle decided at frame %u tick %u\n", frame, syNetInputGetTick());
+					}
+				} else {
+					sDecidedSince = -1;
+				}
 			}
 			break;
 		}
@@ -664,6 +699,15 @@ extern "C" int port_rollback_session_frame(void)
 	gekko_add_local_input(sSession, sConfig.local, &input);
 	HandleGameEvents();
 	sFrames++;
+
+	/* The battle is over once GAME SET is older than the prediction window:
+	 * every input up to it is confirmed, so no rollback can change the
+	 * result. End the session then, before the game tears the battle down
+	 * (restoring a snapshot during teardown would be fatal). */
+	if (sDecidedSince >= 0 && sLastRenderedFrame - sDecidedSince > sConfig.window + 2) {
+		EndSession("battle over");
+		return 1;
+	}
 
 	if (sStarted && (sFrames % 120) == 0) {
 		GekkoNetworkStats stats{};
