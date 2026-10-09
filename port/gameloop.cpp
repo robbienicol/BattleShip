@@ -756,6 +756,21 @@ void PortPushFrame(void)
 			window->HandleEvents();
 		}
 	}
+	/* SSB64_INPUT_TRACE=N (debug): log the controller ports every N frames. */
+	{
+		static int sInputTrace = -1;
+		if (sInputTrace < 0) {
+			const char *env = std::getenv("SSB64_INPUT_TRACE");
+			sInputTrace = (env != nullptr) ? std::atoi(env) : 0;
+		}
+		if (sInputTrace > 0 && context && (sFrameCount % sInputTrace) == 0) {
+			OSContPad pads[MAXCONTROLLERS] = {};
+			context->GetControlDeck()->WriteToPad(pads);
+			port_log("SSB64 Input: frame=%u p1=%04X(%d,%d) p2=%04X(%d,%d) p3=%04X p4=%04X\n", (unsigned)sFrameCount,
+			         pads[0].button, pads[0].stick_x, pads[0].stick_y, pads[1].button, pads[1].stick_x,
+			         pads[1].stick_y, pads[2].button, pads[3].button);
+		}
+	}
 	/* Propagate the previous frame's queued framebuffer (if any) to VI's
 	 * "current" slot. The scheduler's CheckReadyFramebuffer fnCheck reads
 	 * osViGetCurrent/NextFramebuffer to decide whether the slot the game

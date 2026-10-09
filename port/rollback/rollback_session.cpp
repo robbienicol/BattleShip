@@ -34,6 +34,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -69,6 +70,7 @@ struct PortNetInputFrame {
 	uint8_t is_valid;
 };
 int syNetReplayGetLoadedFrame(int player, unsigned int tick, PortNetInputFrame *out);
+int syNetReplayDescribeResults(char *buf, int cap);
 
 /* Mirrors SYNetSyncTickHash (decomp/src/sys/netsync.h). */
 struct PortSessionTickHash {
@@ -400,6 +402,20 @@ GekkoNetAddress PeerAddress(int slot)
 
 #endif
 
+/* Tells the page what the match is doing (web build): Module.onGameEvent(type,
+ * detail) with "session-start", "player-disconnected" {slot}, "desync"
+ * {frame}, "stats" {ping, rollbacks, stalls} and "battle-over" {results}. */
+#if defined(__EMSCRIPTEN__)
+EM_JS(void, web_game_event, (const char *type, const char *json), {
+	var str = function(p) { var e = p; while (HEAPU8[e]) e++; return new TextDecoder().decode(HEAPU8.slice(p, e)); };
+	if (Module.onGameEvent) Module.onGameEvent(str(type), JSON.parse(str(json)));
+});
+#else
+void web_game_event(const char *, const char *)
+{
+}
+#endif
+
 /* ------------------------------------------------------------------------- */
 /*  Session                                                                  */
 /* ------------------------------------------------------------------------- */
@@ -418,6 +434,12 @@ uint32_t StateChecksum()
 
 void EndSession(const char *why)
 {
+	if (sSession != nullptr && std::strcmp(why, "battle over") == 0) {
+		static char results[1024];
+		syNetReplayDescribeResults(results, (int)sizeof(results));
+		port_log("SSB64 Rollback: results %s\n", results);
+		web_game_event("battle-over", results);
+	}
 	if (sSession != nullptr) {
 		port_log("SSB64 Rollback: session ended (%s) frames=%u rollbacks=%u resim_ticks=%u stalls=%u desyncs=%u\n",
 		         why, sFrames, sRollbacks, sResimTicks, sStalls, sDesyncs);
@@ -519,10 +541,16 @@ void HandleSessionEvents()
 			break;
 		case GekkoPlayerDisconnected:
 			port_log("SSB64 Rollback: player %d disconnected\n", e->data.disconnected.handle);
+			{
+				char detail[32];
+				std::snprintf(detail, sizeof(detail), "{\"slot\":%d}", e->data.disconnected.handle);
+				web_game_event("player-disconnected", detail);
+			}
 			break;
 		case GekkoSessionStarted:
 			sStarted = true;
 			port_log("SSB64 Rollback: session started\n");
+			web_game_event("session-start", "{}");
 			break;
 		case GekkoDesyncDetected:
 			sDesyncs++;
@@ -530,6 +558,9 @@ void HandleSessionEvents()
 				port_log("SSB64 Rollback: DESYNC frame=%d local=%08X remote=%08X (player %d)\n",
 				         e->data.desynced.frame, e->data.desynced.local_checksum,
 				         e->data.desynced.remote_checksum, e->data.desynced.remote_handle);
+				char detail[48];
+				std::snprintf(detail, sizeof(detail), "{\"frame\":%d}", e->data.desynced.frame);
+				web_game_event("desync", detail);
 			}
 			break;
 		default:
@@ -634,6 +665,14 @@ extern "C" int port_rollback_session_frame(void)
 	HandleGameEvents();
 	sFrames++;
 
+	if (sStarted && (sFrames % 120) == 0) {
+		GekkoNetworkStats stats{};
+		gekko_network_stats(sSession, sConfig.local == 0 ? 1 : 0, &stats);
+		char detail[128];
+		std::snprintf(detail, sizeof(detail), "{\"ping\":%u,\"rollbacks\":%u,\"stalls\":%u}", stats.last_ping,
+		              sRollbacks, sStalls);
+		web_game_event("stats", detail);
+	}
 	if (sStarted && (sFrames % 600) == 0) {
 		GekkoNetworkStats stats{};
 		gekko_network_stats(sSession, sConfig.local == 0 ? 1 : 0, &stats);

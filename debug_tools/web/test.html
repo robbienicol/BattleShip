@@ -34,6 +34,9 @@ var Module = {
     // Rollback transport for the local pair test (pair.html): tabs/frames on
     // this origin exchange packets over a BroadcastChannel, with optional
     // simulated latency (lat, jit ms) and loss (loss %). The site uses WebRTC.
+    if (q.get("mute")) ENV.SDL_AUDIODRIVER = "dummy";
+    window.gameEvents = [];
+    Module.onGameEvent = (type, detail) => { window.gameEvents.push([type, detail]); if (type !== "stats") log("EVENT " + type + " " + JSON.stringify(detail)); };
     if (q.get("net") === "bc") {
       const self = q.get("self"), lat = +q.get("lat") || 0, jit = +q.get("jit") || 0, loss = +q.get("loss") || 0;
       const bc = new BroadcastChannel("ssb64-net");

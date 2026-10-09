@@ -100,10 +100,26 @@ index 8a62750..5d510b7 100644
  #endif
          {
 diff --git a/src/fast/backends/gfx_sdl2.cpp b/src/fast/backends/gfx_sdl2.cpp
-index ddd8180..57546bc 100644
+index ddd8180..0ee9d45 100644
 --- a/src/fast/backends/gfx_sdl2.cpp
 +++ b/src/fast/backends/gfx_sdl2.cpp
-@@ -714,6 +714,11 @@ static uint64_t qpc_to_100ns(uint64_t qpc) {
+@@ -412,8 +412,15 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
+ 
+ #ifdef __IOS__
+     Uint32 flags = SDL_WINDOW_BORDERLESS | SDL_WINDOW_SHOWN;
++#else
++#ifdef __EMSCRIPTEN__
++    // Browser: a HiDPI canvas has twice the window size in pixels, and the
++    // game framebuffer (window size) then shows only a quarter of the frame.
++    // N64 output gains nothing from the extra pixels, so render 1:1.
++    Uint32 flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE;
+ #else
+     Uint32 flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
++#endif
+ #endif
+ 
+     if (use_opengl) {
+@@ -714,6 +721,11 @@ static uint64_t qpc_to_100ns(uint64_t qpc) {
  }
  
  void GfxWindowBackendSDL2::SyncFramerateWithTime() const {

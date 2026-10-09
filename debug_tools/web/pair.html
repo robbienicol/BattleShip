@@ -6,9 +6,16 @@
 // Local rollback test: two game instances side by side, linked through
 // test.html's BroadcastChannel transport. Extra query params (e.g. lat=75&jit=15&loss=5)
 // pass through to both. Serve build-web locally only — never deploy it.
-const extra = location.search.slice(1);
-const common = "SSB64_ROLLBACK=1&SSB64_ROLLBACK_PLAYERS=2&SSB64_ROLLBACK_PEERS=p0,p1&SSB64_ROLLBACK_SCRIPTED=1" +
-  "&SSB64_REPLAY_PLAY=/test.ssb64r&preload=test.ssb64r&net=bc" + (extra ? "&" + extra : "");
+// ?battle=1 boots both from a website-style battle spec instead of the
+// scripted replay (live controller input on the left instance).
+const params = new URLSearchParams(location.search);
+const battle = params.get("battle");
+params.delete("battle");
+const extra = params.toString();
+const common = "SSB64_ROLLBACK=1&SSB64_ROLLBACK_PLAYERS=2&SSB64_ROLLBACK_PEERS=p0,p1&net=bc&mute=1" +
+  (battle ? "&SSB64_NETPLAY_BATTLE=" + encodeURIComponent(battle === "1" ? "stage=6 seed=4242 stocks=4 fighters=0,1 costumes=0,0" : battle)
+          : "&SSB64_ROLLBACK_SCRIPTED=1&SSB64_REPLAY_PLAY=/test.ssb64r&preload=test.ssb64r") +
+  (extra ? "&" + extra : "");
 for (const slot of [0, 1]) {
   const f = document.createElement("iframe");
   f.src = `test.html?${common}&SSB64_ROLLBACK_LOCAL=${slot}&self=p${slot}&SSB64_LOG_PATH=/ssb64_p${slot}.log`;
