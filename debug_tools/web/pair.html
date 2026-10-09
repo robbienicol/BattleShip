@@ -1,0 +1,18 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>BattleShip Rollback Pair</title>
+<style>html,body{margin:0;height:100%;background:#000;display:flex}iframe{flex:1;border:0;height:100%}</style>
+</head><body>
+<script>
+// Local rollback test: two game instances side by side, linked through
+// test.html's BroadcastChannel transport. Extra query params (e.g. lat=75&jit=15&loss=5)
+// pass through to both. Serve build-web locally only — never deploy it.
+const extra = location.search.slice(1);
+const common = "SSB64_ROLLBACK=1&SSB64_ROLLBACK_PLAYERS=2&SSB64_ROLLBACK_PEERS=p0,p1&SSB64_ROLLBACK_SCRIPTED=1" +
+  "&SSB64_REPLAY_PLAY=/test.ssb64r&preload=test.ssb64r&net=bc" + (extra ? "&" + extra : "");
+for (const slot of [0, 1]) {
+  const f = document.createElement("iframe");
+  f.src = `test.html?${common}&SSB64_ROLLBACK_LOCAL=${slot}&self=p${slot}&SSB64_LOG_PATH=/ssb64_p${slot}.log`;
+  document.body.appendChild(f);
+}
+</script>
+</body></html>

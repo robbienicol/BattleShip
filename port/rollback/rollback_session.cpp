@@ -9,12 +9,17 @@
  *      rendered for the newest tick.
  * Outside a session the frame loop runs one normal tick as before.
  *
- * Native transport is UDP (for local testing). Configuration (debug):
+ * Transport: UDP natively (local testing); in the browser the page supplies
+ * one (WebRTC data channels on the site). Configuration:
  *   SSB64_ROLLBACK=1               enable
- *   SSB64_ROLLBACK_PLAYERS=2       players in the match
+ *   SSB64_ROLLBACK_PLAYERS=2       players in the match (2-4)
  *   SSB64_ROLLBACK_LOCAL=0         this instance's player slot
- *   SSB64_ROLLBACK_PORT=7000       local UDP port
- *   SSB64_ROLLBACK_PEER=host:port  remote address (2-player sessions)
+ *   SSB64_ROLLBACK_PORT=7000       local UDP port (native)
+ *   SSB64_ROLLBACK_PEERS=a,b,...   address of every slot, in slot order (the
+ *                                  local entry is ignored): host:port
+ *                                  natively, peer ids in the browser
+ *   SSB64_ROLLBACK_PEER=host:port  shorthand for the other slot of a 2-player
+ *                                  session
  *   SSB64_ROLLBACK_DELAY=2         local input delay in frames
  *   SSB64_ROLLBACK_WINDOW=8        max prediction (rollback) frames
  *   SSB64_ROLLBACK_SCRIPTED=1      drive the local player from the loaded
@@ -34,7 +39,9 @@
 #include <string>
 #include <vector>
 
-#if !defined(_WIN32)
+#if defined(__EMSCRIPTEN__)
+#include <emscripten.h>
+#elif !defined(_WIN32)
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -104,7 +111,7 @@ struct Config {
 	int players = 2;
 	int local = 0;
 	int port = 7000;
-	std::string peer;
+	std::vector<std::string> peers; /* per slot */
 	int delay = 2;
 	int window = 8;
 	bool scripted = false;
@@ -136,8 +143,21 @@ void LoadConfig()
 	sConfig.players = EnvInt("SSB64_ROLLBACK_PLAYERS", 2);
 	sConfig.local = EnvInt("SSB64_ROLLBACK_LOCAL", 0);
 	sConfig.port = EnvInt("SSB64_ROLLBACK_PORT", 7000);
-	const char *peer = std::getenv("SSB64_ROLLBACK_PEER");
-	sConfig.peer = peer ? peer : "";
+	sConfig.peers.assign((size_t)sConfig.players, std::string());
+	if (const char *list = std::getenv("SSB64_ROLLBACK_PEERS")) {
+		std::string text = list;
+		size_t at = 0;
+		for (int slot = 0; slot < sConfig.players && at <= text.size(); slot++) {
+			size_t comma = text.find(',', at);
+			if (comma == std::string::npos) comma = text.size();
+			sConfig.peers[(size_t)slot] = text.substr(at, comma - at);
+			at = comma + 1;
+		}
+	} else if (const char *peer = std::getenv("SSB64_ROLLBACK_PEER")) {
+		if (sConfig.players == 2 && (sConfig.local == 0 || sConfig.local == 1)) {
+			sConfig.peers[(size_t)(1 - sConfig.local)] = peer;
+		}
+	}
 	sConfig.delay = EnvInt("SSB64_ROLLBACK_DELAY", 2);
 	sConfig.window = EnvInt("SSB64_ROLLBACK_WINDOW", 8);
 	sConfig.scripted = EnvInt("SSB64_ROLLBACK_SCRIPTED", 0) != 0;
@@ -150,13 +170,106 @@ void LoadConfig()
 }
 
 /* ------------------------------------------------------------------------- */
-/*  UDP transport (native testing)                                           */
+/*  Transports                                                               */
 /* ------------------------------------------------------------------------- */
 
-#if !defined(_WIN32)
-int sSocket = -1;
-sockaddr_in sPeerAddr{};
+/* GekkoNet matches senders by comparing address bytes, so each transport
+ * reports a received packet's sender in exactly the form PeerAddress() gives
+ * for that slot. Results are malloc'd piecewise; GekkoNet frees each part. */
 std::vector<GekkoNetResult *> sReceived;
+
+GekkoNetResult *MakeResult(const void *addr, unsigned addr_len, const void *data, unsigned len)
+{
+	auto *res = (GekkoNetResult *)std::malloc(sizeof(GekkoNetResult));
+	res->addr.data = std::malloc(addr_len);
+	std::memcpy(res->addr.data, addr, addr_len);
+	res->addr.size = addr_len;
+	res->data = std::malloc(len);
+	std::memcpy(res->data, data, len);
+	res->data_len = len;
+	return res;
+}
+
+void FreeResult(void *ptr)
+{
+	std::free(ptr);
+}
+
+#if defined(__EMSCRIPTEN__)
+
+/* Browser: the page provides Module.ssbNet = { send(peerId, Uint8Array),
+ * inbox: [{ from: peerId, data: Uint8Array }] } before the battle starts —
+ * WebRTC data channels on the site, BroadcastChannel in the local test page.
+ * Peer ids are short ASCII strings. */
+EM_JS(int, web_net_ready, (), {
+	return (Module.ssbNet && typeof Module.ssbNet.send === "function") ? 1 : 0;
+});
+
+EM_JS(void, web_net_send, (const char *peer, int peer_len, const char *data, int len), {
+	Module.ssbNet.send(String.fromCharCode.apply(null, HEAPU8.subarray(peer, peer + peer_len)),
+	                   HEAPU8.slice(data, data + len));
+});
+
+/* Pops one received packet: writes the sender id (NUL-terminated) and the
+ * payload, returns the payload length, or -1 when the inbox is empty. */
+EM_JS(int, web_net_pop, (char *peer, int peer_cap, char *buf, int cap), {
+	var inbox = Module.ssbNet && Module.ssbNet.inbox;
+	if (!inbox || inbox.length === 0) return -1;
+	var m = inbox.shift();
+	var from = String(m.from);
+	var i = 0;
+	for (; i < from.length && i < peer_cap - 1; i++) HEAPU8[peer + i] = from.charCodeAt(i) & 0x7f;
+	HEAPU8[peer + i] = 0;
+	var d = (m.data instanceof Uint8Array) ? m.data : new Uint8Array(m.data);
+	var n = Math.min(d.length, cap);
+	HEAPU8.set(d.subarray(0, n), buf);
+	return n;
+});
+
+void WebSend(GekkoNetAddress *addr, const char *data, int length)
+{
+	web_net_send((const char *)addr->data, (int)addr->size, data, length);
+}
+
+GekkoNetResult **WebReceive(int *length)
+{
+	sReceived.clear();
+	char peer[64];
+	static char buf[4096];
+	for (;;) {
+		int n = web_net_pop(peer, (int)sizeof(peer), buf, (int)sizeof(buf));
+		if (n < 0) break;
+		sReceived.push_back(MakeResult(peer, (unsigned)std::strlen(peer), buf, (unsigned)n));
+	}
+	*length = (int)sReceived.size();
+	return sReceived.data();
+}
+
+GekkoNetAdapter sAdapter = { WebSend, WebReceive, FreeResult };
+
+bool OpenTransport()
+{
+	if (!web_net_ready()) {
+		port_log("SSB64 Rollback: page has no Module.ssbNet transport\n");
+		return false;
+	}
+	return true;
+}
+
+void CloseTransport()
+{
+}
+
+GekkoNetAddress PeerAddress(int slot)
+{
+	const std::string &id = sConfig.peers[(size_t)slot];
+	return GekkoNetAddress{ (void *)id.data(), (unsigned)id.size() };
+}
+
+#elif !defined(_WIN32)
+
+int sSocket = -1;
+std::vector<sockaddr_in> sPeerAddrs; /* per slot */
 
 bool ParseAddress(const std::string &text, sockaddr_in &out)
 {
@@ -219,8 +332,7 @@ void UdpSend(GekkoNetAddress *addr, const char *data, int length)
 	sDelayed.push_back(std::move(pkt));
 }
 
-/* GekkoNet matches senders by comparing address bytes, so received
- * addresses are normalized exactly like the configured peer address. */
+/* Received addresses are normalized exactly like the configured ones. */
 GekkoNetResult **UdpReceive(int *length)
 {
 	FlushDelayed();
@@ -238,28 +350,23 @@ GekkoNetResult **UdpReceive(int *length)
 		norm.sin_family = AF_INET;
 		norm.sin_port = from.sin_port;
 		norm.sin_addr = from.sin_addr;
-		auto *res = (GekkoNetResult *)std::malloc(sizeof(GekkoNetResult));
-		res->addr.data = std::malloc(sizeof(norm));
-		std::memcpy(res->addr.data, &norm, sizeof(norm));
-		res->addr.size = sizeof(norm);
-		res->data = std::malloc((size_t)n);
-		std::memcpy(res->data, buf, (size_t)n);
-		res->data_len = (unsigned)n;
-		sReceived.push_back(res);
+		sReceived.push_back(MakeResult(&norm, sizeof(norm), buf, (unsigned)n));
 	}
 	*length = (int)sReceived.size();
 	return sReceived.data();
 }
 
-void UdpFree(void *ptr)
-{
-	std::free(ptr);
-}
+GekkoNetAdapter sAdapter = { UdpSend, UdpReceive, FreeResult };
 
-GekkoNetAdapter sUdpAdapter = { UdpSend, UdpReceive, UdpFree };
-
-bool OpenUdp()
+bool OpenTransport()
 {
+	sPeerAddrs.assign((size_t)sConfig.players, sockaddr_in{});
+	for (int slot = 0; slot < sConfig.players; slot++) {
+		if (slot != sConfig.local && !ParseAddress(sConfig.peers[(size_t)slot], sPeerAddrs[(size_t)slot])) {
+			port_log("SSB64 Rollback: slot %d needs a host:port address\n", slot);
+			return false;
+		}
+	}
 	sSocket = socket(AF_INET, SOCK_DGRAM, 0);
 	if (sSocket < 0) return false;
 	sockaddr_in local{};
@@ -270,6 +377,7 @@ bool OpenUdp()
 	local.sin_port = htons((uint16_t)sConfig.port);
 	local.sin_addr.s_addr = htonl(INADDR_ANY);
 	if (bind(sSocket, (sockaddr *)&local, sizeof(local)) != 0) {
+		port_log("SSB64 Rollback: cannot bind UDP port %d\n", sConfig.port);
 		close(sSocket);
 		sSocket = -1;
 		return false;
@@ -278,11 +386,18 @@ bool OpenUdp()
 	return true;
 }
 
-void CloseUdp()
+void CloseTransport()
 {
 	if (sSocket >= 0) close(sSocket);
 	sSocket = -1;
+	sDelayed.clear();
 }
+
+GekkoNetAddress PeerAddress(int slot)
+{
+	return GekkoNetAddress{ &sPeerAddrs[(size_t)slot], sizeof(sockaddr_in) };
+}
+
 #endif
 
 /* ------------------------------------------------------------------------- */
@@ -308,8 +423,8 @@ void EndSession(const char *why)
 		         why, sFrames, sRollbacks, sResimTicks, sStalls, sDesyncs);
 		gekko_destroy(&sSession);
 	}
-#if !defined(_WIN32)
-	CloseUdp();
+#if defined(__EMSCRIPTEN__) || !defined(_WIN32)
+	CloseTransport();
 #endif
 	sSession = nullptr;
 	sStarted = false;
@@ -318,20 +433,19 @@ void EndSession(const char *why)
 
 bool StartSession()
 {
-#if defined(_WIN32)
-	port_log("SSB64 Rollback: native UDP transport is POSIX-only\n");
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+	port_log("SSB64 Rollback: no transport on Windows yet\n");
 	return false;
 #else
-	if (sConfig.players != 2 || !ParseAddress(sConfig.peer, sPeerAddr)) {
-		port_log("SSB64 Rollback: need SSB64_ROLLBACK_PLAYERS=2 and SSB64_ROLLBACK_PEER=host:port\n");
+	if (sConfig.players < 2 || sConfig.players > 4 || sConfig.local < 0 || sConfig.local >= sConfig.players) {
+		port_log("SSB64 Rollback: bad player setup players=%d local=%d\n", sConfig.players, sConfig.local);
 		return false;
 	}
-	if (!OpenUdp()) {
-		port_log("SSB64 Rollback: cannot bind UDP port %d\n", sConfig.port);
+	if (!OpenTransport()) {
 		return false;
 	}
 	if (!gekko_create(&sSession, GekkoGameSession)) {
-		CloseUdp();
+		CloseTransport();
 		return false;
 	}
 	GekkoConfig config{};
@@ -343,25 +457,26 @@ bool StartSession()
 	config.limited_saving = false;
 	config.desync_detection = true;
 	gekko_start(sSession, &config);
-	gekko_net_adapter_set(sSession, &sUdpAdapter);
+	gekko_net_adapter_set(sSession, &sAdapter);
 
 	/* Every peer adds the slots in the same order: handle == player slot. */
+	std::string peers;
 	for (int p = 0; p < sConfig.players; p++) {
 		if (p == sConfig.local) {
 			int handle = gekko_add_actor(sSession, GekkoLocalPlayer, nullptr);
 			gekko_set_local_delay(sSession, handle, (unsigned char)sConfig.delay);
 		} else {
-			GekkoNetAddress addr{ &sPeerAddr, sizeof(sPeerAddr) };
+			GekkoNetAddress addr = PeerAddress(p);
 			gekko_add_actor(sSession, GekkoRemotePlayer, &addr);
 		}
+		peers += (p == 0 ? "" : ",") + (p == sConfig.local ? std::string("(local)") : sConfig.peers[(size_t)p]);
 	}
 	for (int p = 0; p < 4; p++) {
 		syNetInputSetSlotSource(p, kSourceSaved);
 	}
 	sFrames = sRollbacks = sResimTicks = sStalls = sDesyncs = 0;
-	port_log("SSB64 Rollback: session created local=%d port=%d peer=%s delay=%d window=%d scripted=%d\n",
-	         sConfig.local, sConfig.port, sConfig.peer.c_str(), sConfig.delay, sConfig.window,
-	         sConfig.scripted ? 1 : 0);
+	port_log("SSB64 Rollback: session created players=%d local=%d peers=%s delay=%d window=%d scripted=%d\n",
+	         sConfig.players, sConfig.local, peers.c_str(), sConfig.delay, sConfig.window, sConfig.scripted ? 1 : 0);
 	return true;
 #endif
 }

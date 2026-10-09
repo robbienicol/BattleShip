@@ -69,10 +69,22 @@ it there:
 Run it: build-web/test.html?SSB64_SYNCTEST=7&SSB64_REPLAY_PLAY=/test.ssb64r&preload=test.ssb64r
 (make the replay with debug_tools/rollback/make_replay.py build-web/test.ssb64r).
 
+## Browser transport (2026-10-08): verified
+
+The page supplies `Module.ssbNet = { send(peerId, bytes), inbox: [] }`
+(port/rollback/rollback_session.cpp); peers per slot via
+`SSB64_ROLLBACK_PEERS=p0,p1,...` (2-4 players). debug_tools/web/pair.html
+runs two instances side by side over a BroadcastChannel:
+
+- clean: ~16 ms ping, 0 desyncs, replay verify PASS on both;
+- `pair.html?lat=75&jit=15&loss=5`: ~185 ms ping, ~120 rollbacks per
+  1200 frames, 0 desyncs.
+
 ## Next
 
-1. WebRTC DataChannel transport for GekkoNet; hook into ssb64-web
-   matchmaking (site picks fighters/stage, game jumps into the battle).
+1. Site integration: WebRTC data channels as `Module.ssbNet`, signaling over
+   the ssb64-web socket server, site picks fighters/stage and the game jumps
+   straight into the battle.
 2. Input (keyboard/gamepad via SDL in the browser) and audio output checks
    on a visible page; asset extraction from the player's ROM in the browser
    (Torch has an Emscripten build mode) instead of preloading files.
